@@ -6,7 +6,7 @@ from pathlib import Path
 
 from tickflow_assist import schemas, tools
 from tickflow_assist.alert_media import _normalize_points, _scale_trading_x
-from tickflow_assist.clients import _parse_json_rpc, _parse_json_rpc_batch
+from tickflow_assist.clients import _extract_jin10_structured_result, _parse_json_rpc, _parse_json_rpc_batch, _repair_mojibake
 from tickflow_assist.core import _flash_has_more, _flash_next_cursor, _flash_page_items
 from tickflow_assist.config import Config, load_config
 from tickflow_assist.core import App
@@ -407,6 +407,45 @@ def test_jin10_json_rpc_batch_parser_accepts_sse_batch():
 
     assert [item["id"] for item in parsed] == [1, 2]
     assert parsed[1]["result"]["structuredContent"]["data"]["items"] == []
+
+
+def test_jin10_json_rpc_parser_accepts_text_json_content():
+    inner = json.dumps(
+        {
+            "data": {
+                "has_more": True,
+                "items": [
+                    {
+                        "content": "美国天然气期货",
+                        "time": "2026-05-05T22:40:43+08:00",
+                        "url": "https://flash.jin10.com/detail/1",
+                    }
+                ],
+            }
+        },
+        ensure_ascii=False,
+    )
+    outer = {"jsonrpc": "2.0", "id": 3, "result": {"content": [{"type": "text", "text": inner}]}}
+    raw = "event: message\ndata: " + json.dumps(outer, ensure_ascii=False) + "\n\n"
+
+    parsed = _parse_json_rpc(raw)
+    content = _extract_jin10_structured_result(parsed["result"])
+
+    assert content["data"]["items"][0]["content"] == "美国天然气期货"
+
+
+def test_jin10_json_rpc_parser_accepts_split_sse_data():
+    payload = json.dumps({"jsonrpc": "2.0", "id": 3, "result": {"ok": True}}, ensure_ascii=False)
+    raw = f"event: message\ndata: {payload[:30]}\ndata: {payload[30:]}\n\n"
+
+    assert _parse_json_rpc(raw)["result"] == {"ok": True}
+
+
+def test_jin10_text_json_content_repairs_latin1_mojibake():
+    original = "美国天然气期货"
+    broken = original.encode("utf-8").decode("latin1")
+
+    assert _repair_mojibake(broken) == original
 
 
 def test_jin10_flash_page_helpers_use_data_wrapper_contract():

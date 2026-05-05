@@ -181,9 +181,10 @@ class Jin10Client:
         response = requests.post(self.url, headers=headers, json=payload, timeout=45)
         if response.headers.get("mcp-session-id"):
             self.session_id = response.headers["mcp-session-id"]
+        response_text = _decode_response_text(response)
         if not response.ok:
-            raise RuntimeError(f"jin10 MCP request failed: {response.status_code} {response.text}")
-        parsed = _parse_json_rpc(response.text)
+            raise RuntimeError(f"jin10 MCP request failed: {response.status_code} {response_text}")
+        parsed = _parse_json_rpc(response_text)
         if parsed.get("error"):
             raise RuntimeError(f"jin10 MCP error: {parsed['error']}")
         return parsed.get("result")
@@ -198,9 +199,10 @@ class Jin10Client:
         response = requests.post(self.url, headers=headers, json=payloads, timeout=45)
         if response.headers.get("mcp-session-id"):
             self.session_id = response.headers["mcp-session-id"]
+        response_text = _decode_response_text(response)
         if not response.ok:
-            raise RuntimeError(f"jin10 MCP request failed: {response.status_code} {response.text}")
-        parsed = _parse_json_rpc_batch(response.text)
+            raise RuntimeError(f"jin10 MCP request failed: {response.status_code} {response_text}")
+        parsed = _parse_json_rpc_batch(response_text)
         errors = [item.get("error") for item in parsed if isinstance(item, dict) and item.get("error")]
         if errors:
             raise RuntimeError(f"jin10 MCP error: {errors[0]}")
@@ -261,18 +263,7 @@ def _parse_json_rpc(raw: str) -> dict[str, Any]:
     if parsed is not None:
         return parsed
 
-    candidates: list[str] = []
-    for event in re.split(r"\n\s*\n", text):
-        data_lines = []
-        for line in event.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("data:"):
-                data_lines.append(stripped[5:].strip())
-        if data_lines:
-            candidate = "\n".join(data_lines).strip()
-            if candidate and candidate != "[DONE]":
-                candidates.append(candidate)
-    for candidate in reversed(candidates):
+    for candidate in reversed(_sse_data_candidates(text)):
         parsed = _try_json_object(candidate)
         if parsed is not None:
             return parsed
@@ -294,16 +285,17 @@ def _parse_json_rpc_batch(raw: str) -> list[dict[str, Any]]:
         return [parsed]
 
     results = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("data:"):
-            continue
-        data = stripped[5:].strip()
+    seen: set[str] = set()
+    for data in _sse_data_candidates(text):
         try:
             item = json.loads(data)
         except json.JSONDecodeError:
             continue
         if isinstance(item, dict):
+            fingerprint = json.dumps(item, sort_keys=True, ensure_ascii=False)
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
             results.append(item)
     if results:
         return results
@@ -319,6 +311,32 @@ def _try_json_object(text: str) -> dict[str, Any] | None:
     if not isinstance(parsed, dict):
         raise RuntimeError(f"jin10 MCP JSON response is not an object: {type(parsed).__name__}")
     return parsed
+
+
+def _sse_data_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    for event in re.split(r"\r?\n\s*\r?\n", text):
+        data_lines: list[str] = []
+        for line in event.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("data:"):
+                continue
+            data = stripped[5:].strip()
+            if not data or data == "[DONE]":
+                continue
+            data_lines.append(data)
+            candidates.append(data)
+        if len(data_lines) > 1:
+            candidates.append("\n".join(data_lines).strip())
+            candidates.append("".join(data_lines).strip())
+    return [candidate for candidate in candidates if candidate and candidate != "[DONE]"]
+
+
+def _decode_response_text(response: requests.Response) -> str:
+    try:
+        return response.content.decode("utf-8")
+    except UnicodeDecodeError:
+        return response.text
 
 
 def _extract_jin10_tool_error(result: dict[str, Any]) -> str:
@@ -345,8 +363,32 @@ def _extract_jin10_structured_result(result: dict[str, Any]) -> Any:
         for item in content:
             if isinstance(item, dict) and item.get("structuredContent") is not None:
                 return item["structuredContent"]
+            if isinstance(item, dict) and item.get("text"):
+                text = _repair_mojibake(str(item.get("text") or ""))
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError:
+                    continue
         return content
+    if isinstance(content, str) and content:
+        text = _repair_mojibake(content)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return {"text": text}
     return result
+
+
+def _repair_mojibake(value: str) -> str:
+    try:
+        repaired = value.encode("latin1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return value
+    return repaired if _mojibake_score(repaired) < _mojibake_score(value) else value
+
+
+def _mojibake_score(value: str) -> int:
+    return sum(value.count(ch) for ch in ("�", "Ã", "Â", "ç", "å", "è", "æ", "ï¼"))
 
 
 def _normalize_documents(value: Any) -> list[dict[str, Any]]:
