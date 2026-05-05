@@ -39,12 +39,10 @@ def _venv_candidates(root: Path) -> list[Path]:
 
 
 def _site_packages(venv: Path) -> list[Path]:
-    candidates = [
+    return [
         venv / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages",
         venv / "Lib" / "site-packages",
     ]
-    candidates.extend(sorted((venv / "lib").glob("python*/site-packages")))
-    return candidates
 
 
 def _add_path(path: Path) -> None:

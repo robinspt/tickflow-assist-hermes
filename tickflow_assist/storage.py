@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -37,7 +38,10 @@ class LanceStore:
             try:
                 import lancedb
             except ImportError as exc:
-                raise RuntimeError("缺少 Python 依赖 lancedb，请重新执行 ./setup-tickflow.sh 并重启 Hermes；若仍失败，请运行 /ta_debug 查看 Python 路径。") from exc
+                raise RuntimeError(
+                    f"无法导入 Python 依赖 lancedb（当前 Python: {sys.executable}）。"
+                    f"请使用最新 ./setup-tickflow.sh 重新安装并重启 Hermes；原始错误: {exc}"
+                ) from exc
             self._db = lancedb.connect(str(self.path))
         return self._db
 

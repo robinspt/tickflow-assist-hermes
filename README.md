@@ -23,9 +23,9 @@ cd tickflow-assist-hermes
 ./setup-tickflow.sh
 ```
 
-脚本会完成三件事：
+脚本会完成以下工作：
 
-- 创建项目内 `.venv` 并执行 `.venv/bin/python -m pip install -e .`
+- 优先使用 Hermes 自己的 Python 创建项目内 `.venv`，并执行 `.venv/bin/python -m pip install -e .`
 - 写入 `.tickflow-assist-venv`，让 Hermes 运行时能找到实际虚拟环境依赖
 - 将当前目录链接到 `~/.hermes/plugins/tickflow-assist`
 - 交互式生成或更新 `local.config.json`
@@ -49,7 +49,7 @@ ln -s "$(pwd)" ~/.hermes/plugins/tickflow-assist
 
 重启 Hermes 后，在会话里运行 `/plugins`，应能看到 `tickflow-assist`。
 
-如果 `/plugins` 正常但 `/ta_addstock`、`/ta_debug` 提示缺少 `lancedb`、`pandas` 等依赖，通常是 Hermes 进程没有加载到安装脚本创建的虚拟环境。请重新运行 `./setup-tickflow.sh`，确认输出包含“Python 依赖检查通过”和“已记录虚拟环境路径”，然后重启 Hermes；仍失败时运行 `/ta_debug` 查看当前 Python、依赖和路径。
+如果已有 `.venv` 使用的 Python 版本与 Hermes 运行时不一致，脚本会自动把旧虚拟环境挪到 `.venv.pyX.Y.bak.*` 并重建。`/plugins` 正常但 `/ta_addstock` 提示缺少 `lancedb`、`pandas` 等依赖时，请重新运行 `./setup-tickflow.sh`，确认输出包含“Python 依赖检查通过”和“已记录虚拟环境路径”，然后重启 Hermes；仍失败时运行 `/ta_debug` 查看当前 Python、依赖和路径。
 
 如果不使用 `local.config.json`，也可以配置环境变量：
 

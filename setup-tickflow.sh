@@ -3,7 +3,16 @@ set -euo pipefail
 
 PLUGIN_NAME="tickflow-assist"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+HERMES_DEFAULT_PYTHON="$HOME/.hermes/hermes-agent/venv/bin/python3"
+if [ -n "${HERMES_PYTHON:-}" ]; then
+  PYTHON_BIN="$HERMES_PYTHON"
+elif [ -n "${PYTHON_BIN:-}" ]; then
+  PYTHON_BIN="$PYTHON_BIN"
+elif [ -x "$HERMES_DEFAULT_PYTHON" ]; then
+  PYTHON_BIN="$HERMES_DEFAULT_PYTHON"
+else
+  PYTHON_BIN="python3"
+fi
 DEFAULT_VENV_DIR="$ROOT_DIR/.venv"
 FALLBACK_VENV_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/tickflow-assist-hermes/venv"
 VENV_DIR="${TICKFLOW_ASSIST_VENV:-$DEFAULT_VENV_DIR}"
@@ -29,6 +38,12 @@ import sys
 if sys.version_info < (3, 10):
     raise SystemExit("ERROR: TickFlow Assist Hermes 需要 Python >= 3.10")
 PY
+PYTHON_VERSION="$("$PYTHON_BIN" - <<'PY'
+import sys
+print(f"{sys.version_info.major}.{sys.version_info.minor}")
+PY
+)"
+info "==> 使用 Python：$PYTHON_BIN ($PYTHON_VERSION)"
 
 info "==> 安装 Python 依赖"
 if [ "$VENV_DIR" = "$DEFAULT_VENV_DIR" ]; then
@@ -42,6 +57,22 @@ if [ "$VENV_DIR" = "$DEFAULT_VENV_DIR" ]; then
 fi
 
 mkdir -p "$(dirname "$VENV_DIR")"
+if [ -x "$VENV_DIR/bin/python" ]; then
+  VENV_VERSION="$("$VENV_DIR/bin/python" - <<'PY'
+import sys
+print(f"{sys.version_info.major}.{sys.version_info.minor}")
+PY
+)"
+  if [ "$VENV_VERSION" != "$PYTHON_VERSION" ]; then
+    if [ -n "${TICKFLOW_ASSIST_VENV:-}" ]; then
+      die "指定的虚拟环境 $VENV_DIR 使用 Python $VENV_VERSION，但 Hermes/安装 Python 是 $PYTHON_VERSION。请删除该虚拟环境后重试，或改用匹配 Hermes Python 的 TICKFLOW_ASSIST_VENV。"
+    fi
+    BACKUP_VENV_DIR="$VENV_DIR.py$VENV_VERSION.bak.$(date +%Y%m%d%H%M%S)"
+    info "检测到虚拟环境 Python 版本不匹配：$VENV_VERSION != $PYTHON_VERSION"
+    info "==> 将旧虚拟环境移动到：$BACKUP_VENV_DIR"
+    mv "$VENV_DIR" "$BACKUP_VENV_DIR"
+  fi
+fi
 if [ ! -x "$VENV_DIR/bin/python" ]; then
   if ! "$PYTHON_BIN" -m venv "$VENV_DIR"; then
     die "创建虚拟环境失败：$VENV_DIR。若提示 ensurepip/venv 缺失，请先执行 sudo apt install python3-venv；若提示权限不足，请检查目录 owner 或设置 TICKFLOW_ASSIST_VENV=/path/to/writable/venv"
