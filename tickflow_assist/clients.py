@@ -75,6 +75,24 @@ class TickFlowClient:
             output[key] = (payload.get("data") or {}).get(symbol) or []
         return output
 
+    def list_universes(self) -> list[dict[str, Any]]:
+        payload = self._request("GET", "/v1/universes")
+        return list(payload.get("data") or [])
+
+    def universe(self, universe_id: str) -> dict[str, Any] | None:
+        universe_id = str(universe_id or "").strip()
+        if not universe_id:
+            return None
+        payload = self._request("GET", f"/v1/universes/{universe_id}")
+        return payload.get("data")
+
+    def universe_batch(self, universe_ids: list[str]) -> dict[str, dict[str, Any]]:
+        ids = [str(item or "").strip() for item in universe_ids if str(item or "").strip()]
+        if not ids:
+            return {}
+        payload = self._request("POST", "/v1/universes/batch", json={"ids": ids})
+        return dict(payload.get("data") or {})
+
 
 class MxClient:
     def __init__(self, cfg: Config):

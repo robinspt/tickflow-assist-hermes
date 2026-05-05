@@ -328,6 +328,7 @@ def _normalize_points(points: list[tuple[str, float]], current_price: float) -> 
     for time_label, price in raw:
         if normalized and _parse_clock_minutes(normalized[-1][0]) == MORNING_CLOSE_MINUTES and _parse_clock_minutes(time_label) == AFTERNOON_OPEN_MINUTES:
             normalized.append((time_label, normalized[-1][1]))
+            continue
         normalized.append((time_label, price))
     return normalized
 

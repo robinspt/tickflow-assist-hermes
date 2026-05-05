@@ -4,6 +4,7 @@ import json
 import re
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,30 @@ ANALYSIS_SYSTEM = """你是一位A股综合分析师。基于提供的日K、技
 要求：先给100-150字核心摘要，再分“技术面与关键位 / 基本面结论 / 资讯催化与风险 / 共振或冲突与交易判断”展开。
 最后必须输出一个 ```json 代码块，字段包含 current_price, stop_loss, breakthrough, support, cost_level, resistance, take_profit, gap, target, round_number, score。
 不要编造未提供的数据；不构成投资建议。"""
+
+WATCHLIST_PROFILE_EXTRACTION_SYSTEM = """你是A股证券资料结构化抽取助手。
+
+你的唯一任务：根据给定的妙想搜索结果，提取该股票的行业分类与概念板块，并严格输出 JSON。
+
+硬性要求：
+1. 只能依据提供的资料，不得编造。
+2. 只输出 JSON 对象或 ```json 代码块，不要输出解释文字。
+3. JSON 结构固定为：
+{
+  "sector": string | null,
+  "themes": string[],
+  "confidence": "low" | "medium" | "high"
+}
+4. sector 优先提取申万行业/行业分类，保留完整层级；没有可靠信息时填 null。
+5. themes 尽量完整列出概念板块，去重后输出数组；优先保留明确的概念/题材/板块名称，最多保留 10 个。
+6. themes 中不要输出泛词，例如公司新闻、最新公告、市场快讯；也不要输出等。
+7. 若资料中是组合表达，拆成独立概念更优，例如华为昇腾 / 华为昇思应拆成两个数组项。
+8. 若资料仅出现业务描述而没有足够证据支持概念标签，不要强行扩写。
+9. confidence 仅反映你对提取结果的把握，不要附加解释。"""
+
+UNIVERSE_CACHE_REFRESH_SECONDS = 24 * 60 * 60
+UNIVERSE_BATCH_SIZE = 50
+SHENWAN_UNIVERSE_PATTERN = re.compile(r"^CN_Equity_(SW[123])_(\d{6})$")
 
 
 class App:
@@ -81,8 +106,15 @@ class App:
             return "自选列表为空。"
         lines = [f"📋 自选列表（{len(rows)}只）:"]
         for item in rows:
-            themes = f" | 题材: {item.get('themes')}" if item.get("themes") else ""
-            lines.append(f"• {item.get('name') or item['symbol']}（{item['symbol']}） 成本: {fmt_price(item.get('costPrice')) if item.get('costPrice') else '未设置'}{themes}")
+            details = []
+            sector = _clean_profile_text(item.get("sector"))
+            themes = _join_theme_labels(_normalize_theme_labels(item.get("themes"), company_name=item.get("name")))
+            if sector:
+                details.append(f"行业: {sector}")
+            if themes:
+                details.append(f"题材: {themes}")
+            suffix = f" | {' | '.join(details)}" if details else ""
+            lines.append(f"• {item.get('name') or item['symbol']}（{item['symbol']}） 成本: {fmt_price(item.get('costPrice')) if item.get('costPrice') else '未设置'}{suffix}")
         return "\n".join(lines)
 
     def refresh_watchlist_names(self) -> str:
@@ -103,17 +135,39 @@ class App:
         target_rows = [row for row in all_rows if not symbol or row["symbol"] == normalize_symbol(symbol)]
         if not target_rows:
             return "没有需要刷新的自选股。"
+        updated: list[dict[str, Any]] = []
+        rechecked: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
         for row in target_rows:
-            query = f"{row.get('name') or row['symbol']} 所属行业 概念 题材"
+            original = dict(row)
             try:
-                docs = self.mx.search(query)[:3]
-                row["themeQuery"] = query
-                row["themes"] = "；".join(doc["title"] for doc in docs if doc.get("title"))[:500]
-                row["themeUpdatedAt"] = now_text()
+                profile = self._resolve_watchlist_profile(row)
+                current_themes = _normalize_theme_labels(row.get("themes"), company_name=row.get("name"))
+                next_themes = profile["themes"] or current_themes
+                row["sector"] = profile["sector"] or _clean_profile_text(row.get("sector"))
+                row["themes"] = _join_theme_labels(next_themes) or None
+                row["themeQuery"] = profile["themeQuery"] or row.get("themeQuery")
+                row["themeUpdatedAt"] = profile["themeUpdatedAt"] or now_text()
+                if _profile_changed(original, row):
+                    updated.append(row)
+                else:
+                    rechecked.append(row)
             except Exception as exc:
-                row["themes"] = row.get("themes") or f"刷新失败: {exc}"
+                row["sector"] = _clean_profile_text(row.get("sector"))
+                row["themes"] = _join_theme_labels(_normalize_theme_labels(row.get("themes"), company_name=row.get("name"))) or None
+                failed.append({"symbol": row["symbol"], "name": row.get("name") or row["symbol"], "error": str(exc)})
         self.store.replace_where("watchlist", "symbol != ''", all_rows)
-        return f"✅ 已刷新行业/题材信息: {len(target_rows)} 只"
+        lines = [
+            f"✅ 行业/题材刷新完成: 目标 {len(target_rows)} 只 | 资料更新 {len(updated)} | 已复核 {len(rechecked)} | 失败 {len(failed)}",
+            "来源: TickFlow universes（申万行业）" + (" + MX/LLM（概念题材）" if self._can_extract_profile_with_llm() else ""),
+        ]
+        for item in updated[:10]:
+            lines.append(_format_profile_refresh_line(item))
+        if failed:
+            lines.append("失败:")
+            for item in failed[:10]:
+                lines.append(f"• {item['name']}（{item['symbol']}）: {item['error']}")
+        return "\n".join(lines)
 
     def fetch_klines(self, symbol: str, count: int = 90, persist: bool = True) -> list[dict[str, Any]]:
         symbol = normalize_symbol(symbol)
@@ -598,6 +652,141 @@ class App:
         except Exception:
             return symbol
 
+    def _resolve_watchlist_profile(self, row: dict[str, Any]) -> dict[str, Any]:
+        symbol = row["symbol"]
+        name = str(row.get("name") or symbol)
+        updated_at = now_text()
+        industry_profile: dict[str, Any] = {}
+        industry_error: Exception | None = None
+        try:
+            industry_profile = self._resolve_tickflow_industry_profile(symbol)
+        except Exception as exc:
+            industry_error = exc
+        llm_profile = self._resolve_llm_theme_profile(symbol, name) if self._can_extract_profile_with_llm() else {}
+        if not industry_profile and not llm_profile and industry_error:
+            raise industry_error
+        return {
+            "sector": industry_profile.get("sector") or llm_profile.get("sector"),
+            "themes": llm_profile.get("themes") or [],
+            "themeQuery": _build_theme_query(name, symbol),
+            "themeUpdatedAt": updated_at,
+        }
+
+    def _can_extract_profile_with_llm(self) -> bool:
+        return bool(self.mx.configured() and self.config.llm_base_url and self.config.llm_api_key and self.config.llm_model)
+
+    def _resolve_llm_theme_profile(self, symbol: str, name: str) -> dict[str, Any]:
+        query = _build_theme_query(name, symbol)
+        documents = self.mx.search(query)[:8]
+        if not documents:
+            return {}
+        response = call_llm(
+            self.config,
+            WATCHLIST_PROFILE_EXTRACTION_SYSTEM,
+            _build_profile_extraction_prompt(symbol, name, documents),
+            max_tokens=1200,
+            temperature=0.1,
+        )
+        parsed = _extract_json_object(response)
+        if not parsed:
+            return {}
+        return {
+            "sector": _clean_profile_text(parsed.get("sector")),
+            "themes": _normalize_theme_labels(parsed.get("themes"), company_name=name),
+        }
+
+    def _resolve_tickflow_industry_profile(self, symbol: str) -> dict[str, Any]:
+        catalog = self._ensure_universe_catalog()
+        normalized_symbol = normalize_symbol(symbol)
+        universe_ids = catalog["membership_ids_by_symbol"].get(normalized_symbol) or catalog["membership_ids_by_symbol"].get(symbol) or []
+        if not universe_ids:
+            return {}
+        shenwan = []
+        for universe_id in universe_ids:
+            summary = catalog["summaries_by_id"].get(universe_id)
+            parsed = _parse_shenwan_universe(summary) if summary else None
+            if parsed:
+                shenwan.append({"id": universe_id, **parsed})
+        if not shenwan:
+            return {}
+        levels = {item["level"]: item for item in shenwan}
+        names = [levels[level]["label"] for level in ["SW1", "SW2", "SW3"] if level in levels and levels[level].get("label")]
+        return {
+            "sector": "-".join(names) if names else None,
+            "sw1Name": levels.get("SW1", {}).get("label"),
+            "sw2Name": levels.get("SW2", {}).get("label"),
+            "sw3Name": levels.get("SW3", {}).get("label"),
+        }
+
+    def _ensure_universe_catalog(self) -> dict[str, Any]:
+        local_catalog = self._load_universe_catalog()
+        if local_catalog and _catalog_is_fresh(local_catalog):
+            return local_catalog
+        try:
+            return self._sync_universe_catalog()
+        except Exception:
+            if local_catalog:
+                return local_catalog
+            raise
+
+    def _load_universe_catalog(self) -> dict[str, Any] | None:
+        summaries = self.store.rows("universes")
+        memberships = self.store.rows("universe_memberships")
+        if not summaries or not memberships:
+            return None
+        return _build_universe_catalog(summaries, memberships)
+
+    def _sync_universe_catalog(self) -> dict[str, Any]:
+        summaries = self.tickflow.list_universes()
+        if not summaries:
+            raise RuntimeError("TickFlow universe list is empty")
+        details = self._fetch_universe_details(summaries)
+        synced_at = now_text()
+        universe_rows = []
+        membership_rows = []
+        for summary in summaries:
+            universe_id = str(summary.get("id") or "").strip()
+            if not universe_id:
+                continue
+            detail = details.get(universe_id) or summary
+            symbols = [str(item or "").strip() for item in detail.get("symbols") or [] if str(item or "").strip()]
+            universe_rows.append(
+                {
+                    "id": universe_id,
+                    "name": str(detail.get("name") or summary.get("name") or universe_id),
+                    "description": detail.get("description") or summary.get("description"),
+                    "region": str(detail.get("region") or summary.get("region") or "CN"),
+                    "category": str(detail.get("category") or summary.get("category") or ""),
+                    "symbolCount": safe_int(detail.get("symbol_count") or detail.get("symbolCount") or summary.get("symbol_count") or summary.get("symbolCount"), len(symbols) or 0) or 0,
+                    "syncedAt": synced_at,
+                }
+            )
+            membership_rows.extend({"universeId": universe_id, "symbol": _safe_symbol_label(item)} for item in symbols)
+        if not universe_rows or not membership_rows:
+            raise RuntimeError("TickFlow universe sync returned no membership rows")
+        self.store.replace_where("universes", "id != ''", universe_rows)
+        self.store.replace_where("universe_memberships", "universeId != ''", membership_rows)
+        return _build_universe_catalog(universe_rows, membership_rows)
+
+    def _fetch_universe_details(self, summaries: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        output: dict[str, dict[str, Any]] = {}
+        ids = [str(item.get("id") or "").strip() for item in summaries if str(item.get("id") or "").strip()]
+        for index in range(0, len(ids), UNIVERSE_BATCH_SIZE):
+            chunk = ids[index : index + UNIVERSE_BATCH_SIZE]
+            try:
+                output.update(self.tickflow.universe_batch(chunk))
+                missing = [item for item in chunk if item not in output]
+            except Exception:
+                missing = chunk
+            for universe_id in missing:
+                try:
+                    detail = self.tickflow.universe(universe_id)
+                    if detail:
+                        output[universe_id] = detail
+                except Exception:
+                    continue
+        return output
+
     def _latest_rows(self, table: str, symbol: str, sort_by: str, limit: int) -> list[dict[str, Any]]:
         return sorted([r for r in self.store.rows(table) if r.get("symbol") == symbol], key=lambda r: str(r.get(sort_by) or ""))[-limit:]
 
@@ -641,6 +830,222 @@ def _fallback_levels(price: float, cost: Any = None) -> dict[str, Any]:
 
 def _level_row(symbol: str, text: str, levels: dict[str, Any]) -> dict[str, Any]:
     return {"symbol": symbol, "analysis_date": today_text(), "current_price": safe_float(levels.get("current_price"), 0) or 0, "stop_loss": safe_float(levels.get("stop_loss")), "breakthrough": safe_float(levels.get("breakthrough")), "support": safe_float(levels.get("support")), "cost_level": safe_float(levels.get("cost_level")), "resistance": safe_float(levels.get("resistance")), "take_profit": safe_float(levels.get("take_profit")), "gap": safe_float(levels.get("gap")), "target": safe_float(levels.get("target")), "round_number": safe_float(levels.get("round_number")), "analysis_text": text, "score": safe_int(levels.get("score"), 50) or 50}
+
+
+def _build_theme_query(company_name: str, symbol: str) -> str:
+    return f"{company_name} {symbol} 所属行业 板块 题材 概念"
+
+
+def _build_profile_extraction_prompt(symbol: str, company_name: str, documents: list[dict[str, Any]]) -> str:
+    blocks = []
+    for index, doc in enumerate(documents[:8], 1):
+        trunk = str(doc.get("trunk") or "").strip()
+        if len(trunk) > 600:
+            trunk = trunk[:600] + "..."
+        blocks.append(
+            "\n".join(
+                [
+                    f"{index}. 标题: {doc.get('title') or ''}",
+                    f"来源: {doc.get('source') or '未知'}",
+                    f"时间: {doc.get('publishedAt') or '未知'}",
+                    f"正文: {trunk or '无'}",
+                ]
+            )
+        )
+    return "\n".join(
+        [
+            f"股票名称: {company_name}",
+            f"股票代码: {symbol}",
+            "",
+            "请根据下面的妙想搜索结果，提取该股票的行业分类与概念板块，并严格按要求输出 JSON。",
+            "",
+            "## 妙想搜索结果",
+            "\n\n".join(blocks) if blocks else "未获取到任何搜索结果。",
+            "",
+            "再次提醒：不要输出解释，只输出 JSON。",
+        ]
+    )
+
+
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    match = re.search(r"```json\s*(\{.*?\})\s*```", text, re.S)
+    if not match:
+        match = re.search(r"(\{.*\})", text, re.S)
+    if not match:
+        return None
+    try:
+        parsed = json.loads(match.group(1))
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _clean_profile_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, float) and value != value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.lower() in {"nan", "none", "null", "n/a", "na", "--"}:
+        return None
+    if text in {"无", "暂无", "未知", "未识别", "未提及"}:
+        return None
+    return text
+
+
+def _normalize_theme_labels(value: Any, company_name: Any = None) -> list[str]:
+    raw_items = _theme_raw_items(value)
+    labels: list[str] = []
+    seen: set[str] = set()
+    company = _clean_profile_text(company_name) or ""
+    for raw in raw_items:
+        for part in re.split(r"[、,，;；|]|\s*/\s*", str(raw or "")):
+            label = _clean_theme_label(part)
+            if not label or _is_bad_theme_label(label, company) or label in seen:
+                continue
+            seen.add(label)
+            labels.append(label)
+            if len(labels) >= 10:
+                return labels
+    return labels
+
+
+def _theme_raw_items(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        output = []
+        for item in value:
+            output.extend(_theme_raw_items(item))
+        return output
+    return [value]
+
+
+def _clean_theme_label(value: str) -> str | None:
+    text = str(value or "").strip()
+    text = re.sub(r"[《》\"'“”]", "", text)
+    text = re.sub(r"^[：:、，,；;\-]+", "", text)
+    text = re.sub(r"[：:、，,；;。]+$", "", text)
+    text = re.sub(r"[（(].*?[）)]", "", text)
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"等+$", "", text).strip()
+    return _clean_profile_text(text)
+
+
+def _is_bad_theme_label(label: str, company_name: str = "") -> bool:
+    if label in {"公司新闻", "最新公告", "最新新闻", "市场快讯", "公司公告", "行业动态", "板块动态", "题材动态", "概念动态", "资金流向", "龙虎榜"}:
+        return True
+    if re.search(r"(新闻|公告|快讯|资讯|消息|复盘|头条|Loading)$", label):
+        return True
+    if re.search(r"(复盘|今日头条|最新消息|Loading|了解一只股票)", label):
+        return True
+    if company_name and label in {company_name, f"{company_name}股份有限公司", f"{company_name}有限公司"}:
+        return True
+    if len(label) > 24 and not re.search(r"(概念|板块|行业|设备|能源|电力|金融|消费|医药|材料)$", label):
+        return True
+    return False
+
+
+def _join_theme_labels(labels: list[str]) -> str | None:
+    cleaned = _normalize_theme_labels(labels)
+    return "、".join(cleaned) if cleaned else None
+
+
+def _profile_changed(original: dict[str, Any], current: dict[str, Any]) -> bool:
+    return any(
+        (_clean_profile_text(original.get(field)) or "") != (_clean_profile_text(current.get(field)) or "")
+        for field in ["sector", "themes", "themeQuery"]
+    )
+
+
+def _format_profile_refresh_line(item: dict[str, Any]) -> str:
+    sector = _clean_profile_text(item.get("sector")) or "未识别"
+    themes = _join_theme_labels(_normalize_theme_labels(item.get("themes"), company_name=item.get("name"))) or "未识别"
+    updated_at = _clean_profile_text(item.get("themeUpdatedAt")) or "未记录"
+    return f"• {item.get('name') or item['symbol']}（{item['symbol']}） | 行业: {sector} | 题材: {themes} | 更新时间: {updated_at}"
+
+
+def _build_universe_catalog(summaries: list[dict[str, Any]], memberships: list[dict[str, Any]]) -> dict[str, Any]:
+    summaries_by_id = {str(item.get("id") or "").strip(): item for item in summaries if str(item.get("id") or "").strip()}
+    membership_ids_by_symbol: dict[str, list[str]] = {}
+    symbols_by_universe_id: dict[str, list[str]] = {}
+    for item in memberships:
+        universe_id = str(item.get("universeId") or "").strip()
+        symbol = _safe_symbol_label(item.get("symbol"))
+        if not universe_id or not symbol:
+            continue
+        for key in {symbol, _safe_normalized_symbol(symbol)}:
+            if key:
+                _append_unique(membership_ids_by_symbol, key, universe_id)
+        _append_unique(symbols_by_universe_id, universe_id, symbol)
+    latest_synced_at = max((str(item.get("syncedAt") or "") for item in summaries), default="")
+    return {
+        "summaries_by_id": summaries_by_id,
+        "membership_ids_by_symbol": membership_ids_by_symbol,
+        "symbols_by_universe_id": symbols_by_universe_id,
+        "synced_at": latest_synced_at,
+    }
+
+
+def _catalog_is_fresh(catalog: dict[str, Any]) -> bool:
+    timestamp = _parse_china_timestamp(catalog.get("synced_at"))
+    return timestamp is not None and time.time() - timestamp <= UNIVERSE_CACHE_REFRESH_SECONDS
+
+
+def _parse_china_timestamp(value: Any) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", text):
+            parsed = datetime.fromisoformat(text.replace(" ", "T") + "+08:00")
+        else:
+            parsed = datetime.fromisoformat(text)
+        return parsed.timestamp()
+    except Exception:
+        try:
+            return datetime.strptime(text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone(timedelta(hours=8))).timestamp()
+        except Exception:
+            return None
+
+
+def _parse_shenwan_universe(summary: dict[str, Any]) -> dict[str, str] | None:
+    universe_id = str(summary.get("id") or "")
+    match = SHENWAN_UNIVERSE_PATTERN.match(universe_id)
+    if not match:
+        return None
+    level, code = match.groups()
+    label = _extract_universe_label(str(summary.get("name") or ""), _clean_profile_text(summary.get("description")))
+    if not label:
+        return None
+    return {"level": level, "code": code, "label": label}
+
+
+def _extract_universe_label(name: str, description: str | None) -> str | None:
+    if description:
+        label = re.sub(r"^申万[123]级行业[:：]\s*", "", description).strip()
+        if label:
+            return label
+    return re.sub(r"^SW[123]", "", name).strip() or None
+
+
+def _safe_symbol_label(value: Any) -> str:
+    return str(value or "").strip().upper()
+
+
+def _safe_normalized_symbol(value: Any) -> str:
+    try:
+        return normalize_symbol(str(value or ""))
+    except Exception:
+        return _safe_symbol_label(value)
+
+
+def _append_unique(mapping: dict[str, list[str]], key: str, value: str) -> None:
+    existing = mapping.setdefault(key, [])
+    if value not in existing:
+        existing.append(value)
 
 
 def _render_mx_select(keyword: str, result: Any, limit: int) -> str:

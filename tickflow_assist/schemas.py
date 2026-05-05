@@ -18,7 +18,7 @@ TOOL_SCHEMAS = {
     "remove_stock": schema("remove_stock", "Remove a symbol from the local TickFlow Assist watchlist.", {"symbol": SYMBOL}, ["symbol"]),
     "list_watchlist": schema("list_watchlist", "List the local TickFlow Assist watchlist.", {}),
     "refresh_watchlist_names": schema("refresh_watchlist_names", "Refresh watchlist stock names from TickFlow instruments.", {}),
-    "refresh_watchlist_profiles": schema("refresh_watchlist_profiles", "Refresh industry/theme profile hints for watchlist symbols using MX search.", {"symbol": SYMBOL}),
+    "refresh_watchlist_profiles": schema("refresh_watchlist_profiles", "Refresh industry/theme profile hints from TickFlow universes and optional MX/LLM extraction.", {"symbol": SYMBOL}),
     "fetch_klines": schema("fetch_klines", "Fetch and persist daily K-line data, then calculate indicators.", {"symbol": SYMBOL, "count": COUNT}, ["symbol"]),
     "fetch_intraday_klines": schema("fetch_intraday_klines", "Fetch and persist intraday K-lines when TickFlow level supports it.", {"symbol": SYMBOL, "count": COUNT, "period": {"type": "string", "default": "1m"}}, ["symbol"]),
     "fetch_financials": schema("fetch_financials", "Fetch latest TickFlow financial snapshot for Expert API keys.", {"symbol": SYMBOL}, ["symbol"]),
