@@ -71,11 +71,9 @@ def write_alert_card(base_dir: str, card: AlertCardInput) -> Path:
     _text_fit(draw, (48, 84), card.name, "#F4F8FC", _font(34, bold=True), 560)
     timestamp = card.timestamp_label or now_text()
     _text_fit(draw, (48, 132), f"{card.symbol} | {timestamp}", "#8FA8C4", _font(18), 560)
-    draw.rounded_rectangle((48, 150, 170, 180), radius=15, fill=direction_theme["marketPillFill"])
-    draw.text((109, 170), direction_theme["marketLabel"], anchor="mm", fill=direction_theme["marketPillText"], font=_font(14, bold=True))
+    _draw_pill(draw, (48, 158), direction_theme["marketLabel"], _font(13, bold=True), direction_theme["marketPillFill"], direction_theme["marketPillText"], x_padding=12, y_padding=4)
 
-    draw.rounded_rectangle((710, 42, 908, 84), radius=21, fill=tone_theme["signalPillFill"])
-    _text_fit(draw, (809, 69), card.label, tone_theme["signalPillText"], _font(18, bold=True), 178, anchor="mm")
+    _draw_pill(draw, (908, 50), card.label, _font(16, bold=True), tone_theme["signalPillFill"], tone_theme["signalPillText"], x_padding=14, y_padding=5, max_width=158, anchor="ra")
 
     draw.text((718, 106), "当前价", fill="#8AA3BE", font=_font(15))
     draw.text((718, 156), f"{card.current_price:.2f}", fill="#F6FBFF", font=_font(34, bold=True), anchor="lb")
@@ -405,6 +403,25 @@ def _group_rail_markers(markers: list[tuple[str, float, str, int, str]]) -> list
 def _text_fit(draw, xy: tuple[float, float], text: str, fill: str, font, max_width: int, anchor: str | None = None, spacing: int = 0) -> None:
     fitted = _ellipsize(draw, text, font, max_width)
     draw.text(xy, fitted, fill=fill, font=font, anchor=anchor, spacing=spacing)
+
+
+def _draw_pill(draw, xy: tuple[float, float], text: str, font, fill: str, text_fill: str, x_padding: int, y_padding: int, max_width: int | None = None, anchor: str = "la") -> None:
+    max_text_width = max_width - x_padding * 2 if max_width else None
+    fitted = _ellipsize(draw, text, font, max_text_width) if max_text_width else text
+    left, top, right, bottom = draw.textbbox((0, 0), fitted, font=font)
+    text_width = right - left
+    text_height = bottom - top
+    width = text_width + x_padding * 2
+    height = text_height + y_padding * 2
+    x, y = xy
+    if anchor == "ra":
+        box = (x - width, y, x, y + height)
+        text_xy = (x - width / 2, y + height / 2)
+    else:
+        box = (x, y, x + width, y + height)
+        text_xy = (x + width / 2, y + height / 2)
+    draw.rounded_rectangle(box, radius=max(8, int(height / 2)), fill=fill)
+    draw.text(text_xy, fitted, anchor="mm", fill=text_fill, font=font)
 
 
 def _ellipsize(draw, text: str, font, max_width: int) -> str:
