@@ -1,0 +1,23 @@
+{
+  "plugin": {
+    "tickflowApiUrl": "https://api.tickflow.org",
+    "tickflowApiKey": "your-tickflow-key",
+    "tickflowApiKeyLevel": "Free",
+    "mxSearchApiUrl": "https://mkapi2.dfcfs.com/finskillshub/api/claw",
+    "mxSearchApiKey": "mkt_xxx",
+    "jin10McpUrl": "https://mcp.jin10.com/mcp",
+    "jin10ApiToken": "jin10_xxx",
+    "jin10FlashPollInterval": 300,
+    "jin10FlashRetentionDays": 7,
+    "jin10FlashNightAlert": false,
+    "llmBaseUrl": "https://api.openai.com/v1",
+    "llmApiKey": "sk-xxx",
+    "llmModel": "gpt-4o",
+    "databasePath": "./data/lancedb",
+    "calendarFile": "./day_future.txt",
+    "requestInterval": 30,
+    "dailyUpdateNotify": true,
+    "alertDeliveryTarget": "telegram",
+    "alertImageEnabled": true
+  }
+}

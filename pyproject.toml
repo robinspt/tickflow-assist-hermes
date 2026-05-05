@@ -1,0 +1,28 @@
+[project]
+name = "tickflow-assist-hermes"
+version = "0.3.9"
+description = "Hermes plugin for A-share watchlist analysis, monitoring, LanceDB storage, and TickFlow data workflows."
+requires-python = ">=3.10"
+dependencies = [
+  "lancedb>=0.18.0",
+  "pyarrow>=17.0.0",
+  "pandas>=2.0",
+  "numpy>=1.24",
+  "requests>=2.31",
+  "pyyaml>=6.0",
+  "pillow>=10.0"
+]
+
+[project.entry-points."hermes_agent.plugins"]
+tickflow-assist = "tickflow_assist"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["tickflow_assist"]
+py-modules = ["configure_tickflow", "hermes_bootstrap", "schemas", "tools"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

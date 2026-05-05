@@ -1,0 +1,46 @@
+name: tickflow-assist
+version: 0.3.9
+description: A-share watchlist analysis, monitoring, daily update, and alert plugin for Hermes.
+author: robinspt
+provides_tools:
+  - add_stock
+  - remove_stock
+  - list_watchlist
+  - refresh_watchlist_names
+  - refresh_watchlist_profiles
+  - fetch_klines
+  - fetch_intraday_klines
+  - fetch_financials
+  - analyze
+  - view_analysis
+  - backtest_key_levels
+  - update_all
+  - start_monitor
+  - stop_monitor
+  - monitor_status
+  - start_daily_update
+  - stop_daily_update
+  - daily_update_status
+  - test_alert
+  - query_database
+  - mx_search
+  - mx_data
+  - mx_select_stock
+  - screen_stock_candidates
+  - list_eastmoney_watchlist
+  - sync_eastmoney_watchlist
+  - push_eastmoney_watchlist
+  - remove_eastmoney_watchlist
+  - flash_monitor_status
+requires_env:
+  - name: TICKFLOW_ASSIST_TICKFLOW_API_KEY
+    description: TickFlow API key for market data.
+    url: https://tickflow.org/auth/register?ref=BUJ54JEDGE
+    secret: true
+  - name: TICKFLOW_ASSIST_LLM_API_KEY
+    description: OpenAI-compatible API key used for stock analysis.
+    secret: true
+  - name: TICKFLOW_ASSIST_LLM_BASE_URL
+    description: OpenAI-compatible API base URL.
+  - name: TICKFLOW_ASSIST_LLM_MODEL
+    description: Model name used for stock analysis.

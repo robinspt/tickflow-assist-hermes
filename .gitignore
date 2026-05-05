@@ -1,0 +1,14 @@
+dist/
+node_modules/
+.venv/
+data/
+local.config.json
+AGENTS.md
+.codex
+.codex/
+CHANGELOG.unreleased.local.md
+python/__pycache__/
+__pycache__/
+*.egg-info/
+*.pyc
+MIGRATION*.md
