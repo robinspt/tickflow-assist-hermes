@@ -95,7 +95,7 @@ export TICKFLOW_ASSIST_ALERT_IMAGE_ENABLED="true"
 - 日更：`start_daily_update`、`stop_daily_update`、`daily_update_status`，内部创建/移除 Hermes cron jobs
 - 数据库：`query_database`
 - 妙想/东方财富：`mx_search`、`mx_data`、`mx_select_stock`、`screen_stock_candidates`、`list_eastmoney_watchlist`、`sync_eastmoney_watchlist`、`push_eastmoney_watchlist`、`remove_eastmoney_watchlist`
-- 金十：`flash_monitor_status`
+- 金十：`flash_monitor_status`，插件启动且 Jin10 token 已配置时会在 Hermes 进程内自动启动后台轮询，状态包含心跳、最近轮询、最近一轮入库/候选/告警、今日统计、续页补齐、最近异常和最新快讯。
 - 告警：`test_alert`
 
 Hermes 中注册 `/ta_` 插件 Slash Commands，handler 直接调用工具并返回 `text`，不会加载 skill，也不会走模型规划。Hermes chat / CLI 可直接输入 `/ta_addstock`、`/ta_backtest`、`/ta_refreshnames`、`/ta_monitorstatus`、`/ta_testalert`、`/ta_debug`。Telegram / Discord 需要 gateway 的 `/commands` 列表中出现这些命令后才能用 `/ta_*` 触发。本插件同时注册 `ta-*` 兼容别名，因为 Hermes gateway 在 Telegram 分发插件命令时会把下划线命令名转换为连字符后查找；Telegram 菜单仍显示 `/ta_*`。

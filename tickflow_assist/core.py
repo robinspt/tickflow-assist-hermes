@@ -43,6 +43,29 @@ WATCHLIST_PROFILE_EXTRACTION_SYSTEM = """你是A股证券资料结构化抽取�
 UNIVERSE_CACHE_REFRESH_SECONDS = 24 * 60 * 60
 UNIVERSE_BATCH_SIZE = 50
 SHENWAN_UNIVERSE_PATTERN = re.compile(r"^CN_Equity_(SW[123])_(\d{6})$")
+FLASH_MAX_PAGES_PER_POLL = 5
+FLASH_INITIAL_SEED_PAGES = 3
+FLASH_PRUNE_INTERVAL_SECONDS = 6 * 60 * 60
+FLASH_ALERT_FRESHNESS_GRACE_SECONDS = 30
+FLASH_NOISE_PATTERNS = [re.compile(r"^金十图示[:：]"), re.compile(r"交易学院正在直播中")]
+FLASH_HIGH_IMPORTANCE_KEYWORDS = ["重组", "减持", "增持", "业绩预告", "业绩快报", "中标", "签署", "订单", "停牌", "复牌", "监管", "问询", "处罚", "回购"]
+FLASH_DEFAULT_STATE = {
+    "initialized": False,
+    "lastSeenKey": None,
+    "lastSeenPublishedAt": None,
+    "lastSeenUrl": None,
+    "backfillCursor": None,
+    "runtimeHost": None,
+    "runtimeObservedAt": None,
+    "lastHeartbeatAt": None,
+    "lastPollAt": None,
+    "lastPollStored": 0,
+    "lastPollCandidates": 0,
+    "lastPollAlerts": 0,
+    "lastPrunedAt": None,
+    "lastLoopError": None,
+    "lastLoopErrorAt": None,
+}
 
 
 class App:
@@ -460,9 +483,212 @@ class App:
         return "\n".join(["🕒 盘前资讯 / 定时日更 / 收盘复盘状态", f"状态: {'✅ 运行中' if state.get('running') else '⭕ 未启动'}", "运行方式: hermes_cron", "配置来源: Hermes plugin/env/local.config.json", "调度: 日更 15:25 | 复盘 20:00 | 交易日周一至周五", f"Hermes cron 任务: {', '.join(state.get('jobIds') or []) or '暂无'}", f"最近成功: {state.get('lastSuccessAt') or '由 Hermes cron 输出记录'}", f"最近摘要: {state.get('lastResultSummary') or '请通过 Hermes /cron list 查看任务运行记录'}"])
 
     def flash_monitor_status(self) -> str:
+        state = self._read_flash_state()
         rows = self.store.rows("jin10_flash")
         latest = max(rows, key=lambda r: int(r.get("published_ts") or 0), default=None)
-        return "\n".join(["📰 Jin10 快讯监控状态", f"配置: {'已配置' if self.jin10.configured() else '未配置'}", f"已存快讯: {len(rows)}", f"最近快讯: {(latest or {}).get('published_at') or '暂无'}", f"内容: {((latest or {}).get('content') or '')[:160]}"])
+        day_start = f"{today_text()} 00:00:00"
+        day_start_ts = int((_parse_china_timestamp(day_start) or 0) * 1000)
+        stored_today = len([row for row in rows if int(row.get("published_ts") or 0) >= day_start_ts])
+        alerts_today = len([row for row in self.store.rows("jin10_flash_delivery") if str(row.get("delivered_at") or "") >= day_start])
+        watchlist_count = len(self.watchlist())
+        config_error = "" if self.jin10.configured() else "Jin10 MCP 未配置，请设置 jin10ApiToken"
+        running = bool(self.flash_thread and self.flash_thread.is_alive())
+        status = f"未配置（{config_error}）" if config_error else ("后台轮询中" if running else "未启动")
+        lines = [
+            "📰 Jin10 快讯监控状态",
+            f"状态: {status}",
+            f"轮询间隔: {self.config.jin10_flash_poll_interval} 秒",
+            f"保留天数: {self.config.jin10_flash_retention_days} 天",
+            f"关注列表: {watchlist_count}只",
+            f"最近心跳: {state.get('lastHeartbeatAt') or '暂无'}",
+            f"最近轮询: {state.get('lastPollAt') or '暂无'}",
+            f"最近一轮: 入库 {safe_int(state.get('lastPollStored'), 0) or 0} 条 | 候选 {safe_int(state.get('lastPollCandidates'), 0) or 0} 条 | 告警 {safe_int(state.get('lastPollAlerts'), 0) or 0} 条",
+            f"今日统计: 入库 {stored_today} 条 | 告警 {alerts_today} 条",
+            f"续页补齐: {'进行中' if state.get('backfillCursor') else '空闲'}",
+            f"最近清理: {state.get('lastPrunedAt') or '暂无'}",
+        ]
+        if state.get("lastLoopError"):
+            lines.append(f"最近异常: {state.get('lastLoopErrorAt') or '未知时间'} | {state.get('lastLoopError')}")
+        if latest:
+            lines.extend(["", "最新快讯:", f"• 时间: {latest.get('published_at')}", f"• 链接: {latest.get('url') or '-'}", f"• 正文: {_truncate(str(latest.get('content') or ''), 140)}"])
+        return "\n".join(lines)
+
+    def start_flash_monitor(self) -> str:
+        if not self.jin10.configured():
+            state = self._read_flash_state()
+            state.update({"runtimeHost": "hermes_thread", "runtimeObservedAt": now_text(), "lastLoopError": "Jin10 MCP 未配置，请设置 jin10ApiToken", "lastLoopErrorAt": now_text()})
+            self._write_flash_state(state)
+            return "⚠️ Jin10 MCP 未配置，快讯后台轮询未启动。"
+        if not self.flash_thread or not self.flash_thread.is_alive():
+            self.flash_stop.clear()
+            self.flash_thread = threading.Thread(target=self._flash_loop, daemon=True)
+            self.flash_thread.start()
+        return f"✅ Jin10 快讯后台轮询已启动\n轮询间隔: {self.config.jin10_flash_poll_interval} 秒"
+
+    def _flash_loop(self) -> None:
+        while not self.flash_stop.is_set():
+            self._record_flash_heartbeat()
+            try:
+                self._flash_monitor_once()
+            except Exception as exc:
+                self._record_flash_error(exc)
+            self.flash_stop.wait(self.config.jin10_flash_poll_interval)
+
+    def _flash_monitor_once(self) -> int:
+        now = now_text()
+        now_ts = int(time.time() * 1000)
+        state = self._read_flash_state()
+        latest_stored = None if state.get("lastSeenKey") else self._latest_flash()
+        anchor_key = state.get("lastSeenKey") or (latest_stored or {}).get("flash_key")
+        anchor_published_at = state.get("lastSeenPublishedAt") or (latest_stored or {}).get("published_at")
+        anchor_url = state.get("lastSeenUrl") or (latest_stored or {}).get("url")
+
+        if not self.jin10.configured():
+            state.update({"initialized": state.get("initialized") or bool(anchor_key), "lastSeenKey": anchor_key, "lastSeenPublishedAt": anchor_published_at, "lastSeenUrl": anchor_url, "lastPollAt": now, "lastPollStored": 0, "lastPollCandidates": 0, "lastPollAlerts": 0, "lastLoopError": None, "lastLoopErrorAt": None})
+            self._write_flash_state(state)
+            return 0
+
+        if not anchor_key and not state.get("initialized"):
+            seed = self._fetch_latest_flashes(FLASH_INITIAL_SEED_PAGES, None)
+            save = self._save_flash_records(seed["items"])
+            state.update({"initialized": True, "lastSeenKey": (seed.get("latest") or {}).get("flash_key"), "lastSeenPublishedAt": (seed.get("latest") or {}).get("published_at"), "lastSeenUrl": (seed.get("latest") or {}).get("url"), "backfillCursor": None, "lastPollAt": now, "lastPollStored": save["added"], "lastPollCandidates": 0, "lastPollAlerts": 0, "lastLoopError": None, "lastLoopErrorAt": None})
+            self._write_flash_state(state)
+            self._maybe_prune_flash_records(state)
+            return 0
+
+        fetched = self._fetch_latest_flashes(FLASH_MAX_PAGES_PER_POLL, anchor_key)
+        backfill_cursor = state.get("backfillCursor") or fetched.get("nextCursor")
+        backfill = self._fetch_flashes_by_cursor(FLASH_MAX_PAGES_PER_POLL, backfill_cursor) if backfill_cursor else None
+        all_items = _merge_flash_records(fetched["items"], (backfill or {}).get("items") or [])
+        save = self._save_flash_records(all_items)
+        new_keys = set(save["addedKeys"])
+        alertable = _filter_alertable_flash_records([item for item in fetched["items"] if item["flash_key"] in new_keys], state.get("lastPollAt"), now_ts, self.config.jin10_flash_poll_interval)
+        candidates = _build_flash_candidates(alertable, self.watchlist())
+        alerts = 0
+        for candidate in candidates:
+            alerts += self._handle_flash_candidate(candidate)
+        next_backfill_cursor = backfill.get("nextCursor") if backfill is not None else backfill_cursor
+        state.update({"initialized": True, "lastSeenKey": (fetched.get("latest") or {}).get("flash_key") or anchor_key, "lastSeenPublishedAt": (fetched.get("latest") or {}).get("published_at") or anchor_published_at, "lastSeenUrl": (fetched.get("latest") or {}).get("url") or anchor_url, "backfillCursor": next_backfill_cursor, "lastPollAt": now, "lastPollStored": save["added"], "lastPollCandidates": len(candidates), "lastPollAlerts": alerts, "lastLoopError": None, "lastLoopErrorAt": None})
+        self._write_flash_state(state)
+        self._maybe_prune_flash_records(state)
+        return alerts
+
+    def _fetch_latest_flashes(self, max_pages: int, anchor_key: str | None) -> dict[str, Any]:
+        collected: list[dict[str, Any]] = []
+        latest = None
+        cursor = None
+        for page_index in range(max_pages):
+            page = self.jin10.list_flash(cursor)
+            entries = [_to_flash_record(item) for item in _flash_page_items(page)]
+            entries = [item for item in entries if item]
+            if not entries:
+                break
+            latest = latest or entries[0]
+            if anchor_key:
+                anchor_index = next((idx for idx, item in enumerate(entries) if item["flash_key"] == anchor_key), -1)
+                if anchor_index >= 0:
+                    collected.extend(entries[:anchor_index])
+                    return {"items": _sort_flash_records(collected), "latest": latest, "nextCursor": None}
+            collected.extend(entries)
+            next_cursor = _flash_next_cursor(page)
+            if not _flash_has_more(page) or not next_cursor:
+                return {"items": _sort_flash_records(collected), "latest": latest, "nextCursor": None}
+            if page_index == max_pages - 1:
+                return {"items": _sort_flash_records(collected), "latest": latest, "nextCursor": next_cursor}
+            cursor = next_cursor
+        return {"items": _sort_flash_records(collected), "latest": latest, "nextCursor": None}
+
+    def _fetch_flashes_by_cursor(self, max_pages: int, initial_cursor: str) -> dict[str, Any]:
+        collected: list[dict[str, Any]] = []
+        cursor = initial_cursor
+        for page_index in range(max_pages):
+            if not cursor:
+                break
+            page = self.jin10.list_flash(cursor)
+            entries = [_to_flash_record(item) for item in _flash_page_items(page)]
+            collected.extend(item for item in entries if item)
+            next_cursor = _flash_next_cursor(page)
+            if not _flash_has_more(page) or not next_cursor:
+                return {"items": _sort_flash_records(collected), "latest": None, "nextCursor": None}
+            if page_index == max_pages - 1:
+                return {"items": _sort_flash_records(collected), "latest": None, "nextCursor": next_cursor}
+            cursor = next_cursor
+        return {"items": _sort_flash_records(collected), "latest": None, "nextCursor": cursor}
+
+    def _save_flash_records(self, records: list[dict[str, Any]]) -> dict[str, Any]:
+        existing = {row.get("flash_key") for row in self.store.rows("jin10_flash")}
+        new_rows = [row for row in records if row.get("flash_key") and row.get("flash_key") not in existing]
+        if new_rows:
+            self.store.add("jin10_flash", new_rows)
+        return {"added": len(new_rows), "addedKeys": [row["flash_key"] for row in new_rows]}
+
+    def _handle_flash_candidate(self, candidate: dict[str, Any]) -> int:
+        flash = candidate["flash"]
+        if any(row.get("flash_key") == flash["flash_key"] for row in self.store.rows("jin10_flash_delivery")):
+            return 0
+        if not self.config.jin10_flash_night_alert and _is_night_quiet_hour():
+            return 0
+        decision = _fallback_flash_decision(candidate)
+        if not decision["alert"]:
+            return 0
+        symbols = _resolve_flash_symbols(decision["relevantSymbols"], candidate["matches"])
+        if not symbols:
+            return 0
+        message = _build_flash_alert_message(flash, candidate["matches"], decision, symbols)
+        ok, _ = self.send_alert(message)
+        if not ok:
+            return 0
+        self.store.add(
+            "jin10_flash_delivery",
+            [
+                {
+                    "flash_key": flash["flash_key"],
+                    "published_at": flash["published_at"],
+                    "symbols_json": json_text(symbols),
+                    "headline": decision["headline"],
+                    "reason": decision["reason"],
+                    "importance": decision["importance"],
+                    "message": message,
+                    "delivered_at": now_text(),
+                }
+            ],
+        )
+        return 1
+
+    def _latest_flash(self) -> dict[str, Any] | None:
+        return max(self.store.rows("jin10_flash"), key=lambda r: int(r.get("published_ts") or 0), default=None)
+
+    def _maybe_prune_flash_records(self, state: dict[str, Any]) -> None:
+        last_pruned_ts = _parse_china_timestamp(state.get("lastPrunedAt")) or 0
+        if time.time() - last_pruned_ts < FLASH_PRUNE_INTERVAL_SECONDS:
+            return
+        cutoff_ts = int((time.time() - self.config.jin10_flash_retention_days * 24 * 60 * 60) * 1000)
+        cutoff_label = datetime.fromtimestamp(cutoff_ts / 1000, tz=timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+        for table, predicate in [("jin10_flash", f"published_ts < {cutoff_ts}"), ("jin10_flash_delivery", f"delivered_at < '{cutoff_label}'")]:
+            try:
+                if self.store.has_table(table):
+                    self.store.open(table).delete(predicate)
+            except Exception:
+                pass
+        state["lastPrunedAt"] = now_text()
+        self._write_flash_state(state)
+
+    def _record_flash_heartbeat(self) -> None:
+        state = self._read_flash_state()
+        now = now_text()
+        state.update({"lastHeartbeatAt": now, "runtimeHost": "hermes_thread", "runtimeObservedAt": now})
+        self._write_flash_state(state)
+
+    def _record_flash_error(self, error: Exception) -> None:
+        state = self._read_flash_state()
+        state.update({"lastLoopError": str(error), "lastLoopErrorAt": now_text()})
+        self._write_flash_state(state)
+
+    def _read_flash_state(self) -> dict[str, Any]:
+        return {**FLASH_DEFAULT_STATE, **self._read_state("jin10-flash-monitor-state.json")}
+
+    def _write_flash_state(self, state: dict[str, Any]) -> None:
+        self._write_state("jin10-flash-monitor-state.json", {**FLASH_DEFAULT_STATE, **state})
 
     def test_alert(self) -> str:
         message = f"🧪 TickFlow 测试告警\n时间: {now_text()}\n说明: 这是一条由 Hermes 插件发出的测试消息。"
@@ -1046,6 +1272,197 @@ def _append_unique(mapping: dict[str, list[str]], key: str, value: str) -> None:
     existing = mapping.setdefault(key, [])
     if value not in existing:
         existing.append(value)
+
+
+def _flash_page_items(page: Any) -> list[dict[str, Any]]:
+    if not isinstance(page, dict):
+        return []
+    for key in ["items", "data", "list", "rows"]:
+        value = page.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _flash_has_more(page: Any) -> bool:
+    return bool(isinstance(page, dict) and (page.get("hasMore") or page.get("has_more") or page.get("hasNext")))
+
+
+def _flash_next_cursor(page: Any) -> str | None:
+    if not isinstance(page, dict):
+        return None
+    value = page.get("nextCursor") or page.get("next_cursor") or page.get("cursor")
+    text = str(value or "").strip()
+    return text or None
+
+
+def _to_flash_record(item: dict[str, Any]) -> dict[str, Any] | None:
+    content = str(item.get("content") or item.get("text") or item.get("title") or "").strip()
+    raw_time = str(item.get("time") or item.get("published_at") or item.get("publishedAt") or item.get("date") or "").strip()
+    url = str(item.get("url") or item.get("link") or "").strip()
+    if not content or not raw_time:
+        return None
+    published_ts = _parse_flash_time_ms(raw_time)
+    if published_ts is None:
+        return None
+    published_at = datetime.fromtimestamp(published_ts / 1000, tz=timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+    flash_key = url or hash_key(raw_time, content)
+    return {"flash_key": flash_key, "published_at": published_at, "published_ts": int(published_ts), "content": content, "url": url, "ingested_at": now_text(), "raw_json": json_text(item.get("raw") or item)}
+
+
+def _parse_flash_time_ms(value: str) -> int | None:
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        if text.isdigit():
+            number = int(text)
+            return number if number > 10_000_000_000 else number * 1000
+        normalized = text.replace("Z", "+00:00")
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", normalized):
+            parsed = datetime.fromisoformat(normalized.replace(" ", "T") + "+08:00")
+        else:
+            parsed = datetime.fromisoformat(normalized.replace(" ", "T"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone(timedelta(hours=8)))
+        return int(parsed.timestamp() * 1000)
+    except Exception:
+        return None
+
+
+def _sort_flash_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(records, key=lambda item: int(item.get("published_ts") or 0))
+
+
+def _merge_flash_records(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for group in groups:
+        for item in group:
+            key = str(item.get("flash_key") or "")
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+    return _sort_flash_records(merged)
+
+
+def _filter_alertable_flash_records(records: list[dict[str, Any]], last_poll_at: Any, now_ts: int, poll_interval_seconds: int) -> list[dict[str, Any]]:
+    interval_cutoff = now_ts - max(1, int(poll_interval_seconds or 1)) * 1000 - FLASH_ALERT_FRESHNESS_GRACE_SECONDS * 1000
+    parsed_last_poll = _parse_china_timestamp(last_poll_at)
+    last_poll_ts = int(parsed_last_poll * 1000) if parsed_last_poll is not None else -10**30
+    cutoff = max(interval_cutoff, last_poll_ts - FLASH_ALERT_FRESHNESS_GRACE_SECONDS * 1000)
+    return [item for item in records if int(item.get("published_ts") or 0) >= cutoff]
+
+
+def _build_flash_candidates(flashes: list[dict[str, Any]], watchlist: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    candidates = []
+    for flash in flashes:
+        if _should_ignore_flash(str(flash.get("content") or "")):
+            continue
+        matches = []
+        normalized_content = _normalize_flash_text(str(flash.get("content") or ""))
+        for item in watchlist:
+            direct = [keyword for keyword in _flash_direct_keywords(item) if _normalize_flash_text(keyword) in normalized_content]
+            boards = [keyword for keyword in _flash_board_keywords(item) if _normalize_flash_text(keyword) in normalized_content]
+            if direct or boards:
+                matches.append({"item": item, "directKeywords": direct, "boardKeywords": boards})
+        if matches:
+            candidates.append({"flash": flash, "matches": matches})
+    return candidates
+
+
+def _flash_direct_keywords(item: dict[str, Any]) -> list[str]:
+    symbol = str(item.get("symbol") or "")
+    code = ""
+    try:
+        code = symbol_code(symbol)
+    except Exception:
+        code = symbol
+    return _unique_compact([symbol, code, str(item.get("name") or "")])
+
+
+def _flash_board_keywords(item: dict[str, Any]) -> list[str]:
+    values = []
+    sector = _clean_profile_text(item.get("sector"))
+    if sector:
+        values.extend(re.split(r"[-/|>|→｜]", sector))
+    values.extend(_normalize_theme_labels(item.get("themes"), company_name=item.get("name")))
+    return [value for value in _unique_compact(values) if _useful_flash_board_keyword(value)]
+
+
+def _useful_flash_board_keyword(value: str) -> bool:
+    text = re.sub(r"\s+", "", value).strip()
+    return len(text) >= 2 and not re.search(r"(行业|板块|题材|概念|个股|公司|市场|资讯|公告|快讯|新闻|政策)$", text)
+
+
+def _should_ignore_flash(content: str) -> bool:
+    text = content.strip()
+    return any(pattern.search(text) for pattern in FLASH_NOISE_PATTERNS)
+
+
+def _fallback_flash_decision(candidate: dict[str, Any]) -> dict[str, Any]:
+    direct_symbols = [match["item"]["symbol"] for match in candidate["matches"] if match.get("directKeywords")]
+    if not direct_symbols:
+        return {"alert": False, "importance": "low", "relevantSymbols": [], "headline": "", "reason": ""}
+    return {"alert": True, "importance": _infer_flash_importance(str(candidate["flash"].get("content") or "")), "relevantSymbols": _unique_compact(direct_symbols), "headline": "Jin10快讯直接命中自选股", "reason": "快讯直接提及关注股票/公司，建议尽快核实公告、消息来源与盘面反馈。"}
+
+
+def _resolve_flash_symbols(llm_symbols: list[str], matches: list[dict[str, Any]]) -> list[str]:
+    available = {match["item"]["symbol"] for match in matches}
+    direct = [match["item"]["symbol"] for match in matches if match.get("directKeywords")]
+    normalized = [symbol for symbol in _unique_compact(llm_symbols) if symbol in available]
+    return normalized or _unique_compact(direct) or _unique_compact([match["item"]["symbol"] for match in matches])
+
+
+def _build_flash_alert_message(flash: dict[str, Any], matches: list[dict[str, Any]], decision: dict[str, Any], symbols: list[str]) -> str:
+    labels = []
+    for symbol in symbols:
+        matched = next((match for match in matches if match["item"].get("symbol") == symbol), None)
+        labels.append(f"{matched['item'].get('name') or symbol}（{symbol}）" if matched else symbol)
+    return "\n".join(
+        [
+            f"📰 {decision.get('headline') or 'Jin10快讯命中自选'}",
+            f"时间: {flash.get('published_at')}",
+            f"级别: {_format_flash_importance(str(decision.get('importance') or 'medium'))}",
+            f"关联: {'、'.join(labels)}",
+            f"判断: {decision.get('reason') or '快讯与当前关注标的相关，建议尽快核实。'}",
+            f"快讯: {_truncate(str(flash.get('content') or ''), 260)}",
+            f"来源: {flash.get('url') or '-'}",
+        ]
+    )
+
+
+def _infer_flash_importance(content: str) -> str:
+    return "high" if any(keyword in content for keyword in FLASH_HIGH_IMPORTANCE_KEYWORDS) else "medium"
+
+
+def _format_flash_importance(value: str) -> str:
+    return {"high": "高", "medium": "中", "low": "低"}.get(value, "中")
+
+
+def _is_night_quiet_hour() -> bool:
+    hour = datetime.now(timezone(timedelta(hours=8))).hour
+    return hour >= 22 or hour < 6
+
+
+def _normalize_flash_text(value: str) -> str:
+    return value.lower().replace(" ", "").strip()
+
+
+def _unique_compact(values: list[Any]) -> list[str]:
+    output = []
+    seen = set()
+    for value in values:
+        text = re.sub(r"\s+", "", str(value or "")).strip()
+        if text and text not in seen:
+            seen.add(text)
+            output.append(text)
+    return output
+
+
+def _truncate(value: str, max_length: int) -> str:
+    return value if len(value) <= max_length else value[:max_length] + "..."
 
 
 def _render_mx_select(keyword: str, result: Any, limit: int) -> str:

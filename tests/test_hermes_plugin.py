@@ -264,6 +264,58 @@ def test_start_daily_update_uses_hermes_cron_jobs():
     assert all(call["deliver"] == "telegram" for call in cron_calls)
 
 
+def test_flash_monitor_status_renders_runtime_state_and_latest_flash():
+    class MemoryStore:
+        def __init__(self):
+            self.tables = {
+                "watchlist": [{"symbol": "002261.SZ", "name": "拓维信息", "addedAt": "2026-05-05 09:30:00"}],
+                "jin10_flash": [
+                    {
+                        "flash_key": "https://flash.jin10.com/detail/1",
+                        "published_at": "2026-05-05 21:50:06",
+                        "published_ts": 1777998606000,
+                        "content": "金十快讯测试正文",
+                        "url": "https://flash.jin10.com/detail/1",
+                    }
+                ],
+                "jin10_flash_delivery": [{"flash_key": "1", "delivered_at": "2026-05-05 21:51:00"}],
+            }
+
+        def rows(self, name):
+            return [dict(row) for row in self.tables.get(name, [])]
+
+    class AliveThread:
+        def is_alive(self):
+            return True
+
+    with tempfile.TemporaryDirectory() as tmp:
+        app = App(Config(database_path=tmp, jin10_api_token="token"))
+        app.store = MemoryStore()
+        app.flash_thread = AliveThread()
+        app._write_flash_state(
+            {
+                "lastHeartbeatAt": "2026-05-05 22:14:43",
+                "lastPollAt": "2026-05-05 22:04:30",
+                "lastPollStored": 3,
+                "lastPollCandidates": 1,
+                "lastPollAlerts": 0,
+                "backfillCursor": "cursor",
+                "lastPrunedAt": "2026-05-05 21:39:17",
+                "lastLoopError": "fetch failed",
+                "lastLoopErrorAt": "2026-05-05 22:14:53",
+            }
+        )
+        text = app.flash_monitor_status()
+
+    assert "状态: 后台轮询中" in text
+    assert "轮询间隔: 300 秒" in text
+    assert "关注列表: 1只" in text
+    assert "最近一轮: 入库 3 条 | 候选 1 条 | 告警 0 条" in text
+    assert "续页补齐: 进行中" in text
+    assert "最近异常: 2026-05-05 22:14:53 | fetch failed" in text
+    assert "最新快讯:" in text
+
+
 def test_refresh_profiles_uses_tickflow_universes_and_drops_news_titles():
     class MemoryStore:
         def __init__(self, rows):

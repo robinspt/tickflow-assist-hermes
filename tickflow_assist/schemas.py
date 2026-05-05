@@ -42,6 +42,6 @@ TOOL_SCHEMAS = {
     "sync_eastmoney_watchlist": schema("sync_eastmoney_watchlist", "Sync Eastmoney self-select watchlist into local LanceDB watchlist.", {}),
     "push_eastmoney_watchlist": schema("push_eastmoney_watchlist", "Push local watchlist symbols to Eastmoney self-select.", {}),
     "remove_eastmoney_watchlist": schema("remove_eastmoney_watchlist", "Remove a symbol from Eastmoney self-select only.", {"symbol": SYMBOL}, ["symbol"]),
-    "flash_monitor_status": schema("flash_monitor_status", "Show Jin10 flash monitor storage/configuration status.", {}),
+    "flash_monitor_status": schema("flash_monitor_status", "Show Jin10 flash monitor runtime state, recent poll summary, storage counters, and latest flash.", {}),
     "debug_status": schema("debug_status", "Show TickFlow Assist Hermes runtime diagnostics, dependency status, paths, database path, and alert configuration.", {}),
 }

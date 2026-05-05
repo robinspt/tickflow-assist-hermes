@@ -52,6 +52,12 @@ def register(ctx):
                 ctx.register_skill(child.name, skill_md)
     ctx.register_hook("pre_llm_call", _pre_llm_context)
     _register_commands(ctx)
+    try:
+        app = tools.get_app()
+        if app.jin10.configured():
+            app.start_flash_monitor()
+    except Exception:
+        pass
 
 
 def _register_commands(ctx) -> None:
