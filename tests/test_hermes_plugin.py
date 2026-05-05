@@ -6,7 +6,8 @@ from pathlib import Path
 
 from tickflow_assist import schemas, tools
 from tickflow_assist.alert_media import _normalize_points, _scale_trading_x
-from tickflow_assist.clients import _parse_json_rpc
+from tickflow_assist.clients import _parse_json_rpc, _parse_json_rpc_batch
+from tickflow_assist.core import _flash_has_more, _flash_next_cursor, _flash_page_items
 from tickflow_assist.config import Config, load_config
 from tickflow_assist.core import App
 from tickflow_assist.plugin import register
@@ -389,3 +390,28 @@ def test_jin10_json_rpc_parser_skips_non_json_sse_data():
     raw = ': ping\n\nevent: endpoint\ndata: /mcp\n\nevent: message\ndata: {"jsonrpc":"2.0","id":2,"result":{"items":[]}}\n\n'
 
     assert _parse_json_rpc(raw)["id"] == 2
+
+
+def test_jin10_json_rpc_batch_parser_accepts_sse_batch():
+    raw = '\n'.join(
+        [
+            'event: message',
+            'data: {"jsonrpc":"2.0","id":1,"result":{"server":"ok"}}',
+            '',
+            'event: message',
+            'data: {"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"data":{"items":[]}}}}',
+        ]
+    )
+
+    parsed = _parse_json_rpc_batch(raw)
+
+    assert [item["id"] for item in parsed] == [1, 2]
+    assert parsed[1]["result"]["structuredContent"]["data"]["items"] == []
+
+
+def test_jin10_flash_page_helpers_use_data_wrapper_contract():
+    page = {"data": {"items": [{"title": "快讯"}], "next_cursor": "cursor-1", "has_more": True}}
+
+    assert _flash_page_items(page) == [{"title": "快讯"}]
+    assert _flash_next_cursor(page) == "cursor-1"
+    assert _flash_has_more(page) is True

@@ -145,8 +145,6 @@ class Jin10Client:
     def list_flash(self, cursor: str | None = None) -> dict[str, Any]:
         if not self.configured():
             raise RuntimeError("Jin10 MCP 未配置，请设置 jin10ApiToken")
-        if not self.initialized:
-            self._initialize()
         return self._call_tool("list_flash", {"cursor": cursor} if cursor else {})
 
     def _initialize(self) -> None:
@@ -155,20 +153,24 @@ class Jin10Client:
         self.initialized = True
 
     def _call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-        result = self._request("tools/call", {"name": name, "arguments": arguments})
+        if not self.initialized:
+            result = self._initialize_and_call_tool(name, arguments)
+            self.initialized = True
+        else:
+            result = self._request("tools/call", {"name": name, "arguments": arguments})
+        if not result:
+            raise RuntimeError(f"jin10 tool {name} returned empty result")
         if result.get("isError"):
-            raise RuntimeError(f"jin10 tool {name} returned error")
-        if "structuredContent" in result:
-            return result["structuredContent"]
-        for item in result.get("content") or []:
-            if "structuredContent" in item:
-                return item["structuredContent"]
-            if item.get("text"):
-                try:
-                    return json.loads(item["text"])
-                except Exception:
-                    return {"text": item["text"]}
-        return result
+            raise RuntimeError(_extract_jin10_tool_error(result))
+        return _extract_jin10_structured_result(result)
+
+    def _initialize_and_call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        init_payload = {"jsonrpc": "2.0", "id": self.request_id, "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "tickflow-assist-hermes", "version": "0.3.9"}}}
+        self.request_id += 1
+        tool_payload = {"jsonrpc": "2.0", "id": self.request_id, "method": "tools/call", "params": {"name": name, "arguments": arguments or {}}}
+        self.request_id += 1
+        results = self._batch_request([init_payload, tool_payload])
+        return results[1] if len(results) >= 2 else (results[-1] if results else {})
 
     def _request(self, method: str, params: Any) -> Any:
         payload = {"jsonrpc": "2.0", "id": self.request_id, "method": method, "params": params}
@@ -188,6 +190,21 @@ class Jin10Client:
 
     def _notify(self, method: str) -> None:
         requests.post(self.url, headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.token}", "X-API-Key": self.token}, json={"jsonrpc": "2.0", "method": method}, timeout=20)
+
+    def _batch_request(self, payloads: list[dict[str, Any]]) -> list[Any]:
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.token}", "X-API-Key": self.token, "Accept": "application/json, text/event-stream"}
+        if self.session_id:
+            headers["mcp-session-id"] = self.session_id
+        response = requests.post(self.url, headers=headers, json=payloads, timeout=45)
+        if response.headers.get("mcp-session-id"):
+            self.session_id = response.headers["mcp-session-id"]
+        if not response.ok:
+            raise RuntimeError(f"jin10 MCP request failed: {response.status_code} {response.text}")
+        parsed = _parse_json_rpc_batch(response.text)
+        errors = [item.get("error") for item in parsed if isinstance(item, dict) and item.get("error")]
+        if errors:
+            raise RuntimeError(f"jin10 MCP error: {errors[0]}")
+        return [item.get("result") for item in parsed if isinstance(item, dict)]
 
 
 def call_llm(cfg: Config, system: str, user: str, max_tokens: int = 4096, temperature: float = 0.3) -> str:
@@ -239,7 +256,7 @@ def _compact_to_rows(symbol: str, data: Any, period: str) -> list[dict[str, Any]
 def _parse_json_rpc(raw: str) -> dict[str, Any]:
     text = raw.strip()
     if not text:
-        raise RuntimeError("jin10 MCP response is empty")
+        return {}
     parsed = _try_json_object(text)
     if parsed is not None:
         return parsed
@@ -263,6 +280,37 @@ def _parse_json_rpc(raw: str) -> dict[str, Any]:
     raise RuntimeError(f"jin10 MCP response is not valid JSON/SSE JSON: {preview}")
 
 
+def _parse_json_rpc_batch(raw: str) -> list[dict[str, Any]]:
+    text = raw.strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, list):
+        return [item for item in parsed if isinstance(item, dict)]
+    if isinstance(parsed, dict):
+        return [parsed]
+
+    results = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("data:"):
+            continue
+        data = stripped[5:].strip()
+        try:
+            item = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            results.append(item)
+    if results:
+        return results
+    preview = text[:300].replace("\n", "\\n")
+    raise RuntimeError(f"jin10 MCP batch response is not valid JSON/SSE JSON: {preview}")
+
+
 def _try_json_object(text: str) -> dict[str, Any] | None:
     try:
         parsed = json.loads(text)
@@ -271,6 +319,34 @@ def _try_json_object(text: str) -> dict[str, Any] | None:
     if not isinstance(parsed, dict):
         raise RuntimeError(f"jin10 MCP JSON response is not an object: {type(parsed).__name__}")
     return parsed
+
+
+def _extract_jin10_tool_error(result: dict[str, Any]) -> str:
+    structured = result.get("structuredContent")
+    if isinstance(structured, dict):
+        message = structured.get("message") or structured.get("error")
+        if message:
+            return str(message)
+    content = result.get("content")
+    if isinstance(content, list):
+        texts = [str(item.get("text")) for item in content if isinstance(item, dict) and item.get("text")]
+        if texts:
+            return "\n".join(texts)
+    if isinstance(content, str) and content:
+        return content
+    return "Tool execution error"
+
+
+def _extract_jin10_structured_result(result: dict[str, Any]) -> Any:
+    if result.get("structuredContent") is not None:
+        return result["structuredContent"]
+    content = result.get("content")
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict) and item.get("structuredContent") is not None:
+                return item["structuredContent"]
+        return content
+    return result
 
 
 def _normalize_documents(value: Any) -> list[dict[str, Any]]:

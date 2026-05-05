@@ -1277,6 +1277,9 @@ def _append_unique(mapping: dict[str, list[str]], key: str, value: str) -> None:
 def _flash_page_items(page: Any) -> list[dict[str, Any]]:
     if not isinstance(page, dict):
         return []
+    data = page.get("data")
+    if isinstance(data, dict):
+        return _flash_page_items(data)
     for key in ["items", "data", "list", "rows"]:
         value = page.get(key)
         if isinstance(value, list):
@@ -1285,12 +1288,17 @@ def _flash_page_items(page: Any) -> list[dict[str, Any]]:
 
 
 def _flash_has_more(page: Any) -> bool:
+    if isinstance(page, dict) and isinstance(page.get("data"), dict):
+        return _flash_has_more(page["data"])
     return bool(isinstance(page, dict) and (page.get("hasMore") or page.get("has_more") or page.get("hasNext")))
 
 
 def _flash_next_cursor(page: Any) -> str | None:
     if not isinstance(page, dict):
         return None
+    data = page.get("data")
+    if isinstance(data, dict):
+        return _flash_next_cursor(data)
     value = page.get("nextCursor") or page.get("next_cursor") or page.get("cursor")
     text = str(value or "").strip()
     return text or None
