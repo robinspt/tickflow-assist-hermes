@@ -28,8 +28,7 @@ cd tickflow-assist-hermes
 - 优先使用 Hermes 自己的 Python 创建项目内 `.venv`，并执行 `.venv/bin/python -m pip install -e .`
 - 写入 `.tickflow-assist-venv`，让 Hermes 运行时能找到实际虚拟环境依赖
 - 将当前目录链接到 `~/.hermes/plugins/tickflow-assist`
-- 将 `/ta-*` 命令 skills 链接到 `~/.hermes/skills`，供 Discord 原生命令菜单同步
-- 移除本项目旧的 `~/.hermes/skills/ta` 符号链接，避免 Discord 继续显示 `/ta` 总入口
+- 清理本项目旧的 `~/.hermes/skills/ta*` 符号链接，避免继续通过 skill 触发
 - 交互式生成或更新 `local.config.json`
 
 如果项目目录不可写，脚本会自动改用 `~/.local/share/tickflow-assist-hermes/venv`。也可以显式指定：
@@ -43,20 +42,17 @@ TICKFLOW_ASSIST_VENV=~/.local/share/tickflow-assist-hermes/venv ./setup-tickflow
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -e .
-mkdir -p ~/.hermes/plugins ~/.hermes/skills
+mkdir -p ~/.hermes/plugins
 ln -s "$(pwd)" ~/.hermes/plugins/tickflow-assist
-for skill in skills/ta-*; do
-  ln -sfn "$(pwd)/$skill" "$HOME/.hermes/skills/$(basename "$skill")"
-done
 ```
 
-如果曾安装过旧的 `/ta` 总入口，或旧的 `/ta_*` skill 链接，重新运行脚本会清理指向本项目的旧符号链接，避免菜单重复。
+如果曾安装过旧的 `/ta`、`/ta-*` 或 `/ta_*` skill 链接，重新运行脚本会清理指向本项目的旧符号链接，避免命令通过 skill 慢路径触发。
 
 如果系统缺少 venv 支持，Debian/Ubuntu 可先执行 `sudo apt install python3-venv`。
 
 重启 Hermes gateway 后，在会话里运行 `/plugins`，应能看到 `tickflow-assist`。Discord / Telegram 的命令菜单也会在 gateway 启动时刷新；如果菜单没有立刻变化，执行 `hermes gateway restart` 或在聊天里用 `/restart` 重启 gateway。Discord 全局命令有传播延迟，通常需要等待一小段时间。
 
-如果已有 `.venv` 使用的 Python 版本与 Hermes 运行时不一致，脚本会自动把旧虚拟环境挪到 `.venv.pyX.Y.bak.*` 并重建。`/plugins` 正常但 `/ta-addstock` 提示缺少 `lancedb`、`pandas` 等依赖时，请重新运行 `./setup-tickflow.sh`，确认输出包含“Python 依赖检查通过”和“已记录虚拟环境路径”，然后重启 Hermes；仍失败时运行 `/ta-debug` 查看当前 Python、依赖和路径。
+如果已有 `.venv` 使用的 Python 版本与 Hermes 运行时不一致，脚本会自动把旧虚拟环境挪到 `.venv.pyX.Y.bak.*` 并重建。`/plugins` 正常但 `/ta_addstock` 提示缺少 `lancedb`、`pandas` 等依赖时，请重新运行 `./setup-tickflow.sh`，确认输出包含“Python 依赖检查通过”和“已记录虚拟环境路径”，然后重启 Hermes；仍失败时运行 `/ta_debug` 查看当前 Python、依赖和路径。
 
 如果不使用 `local.config.json`，也可以配置环境变量：
 
@@ -102,9 +98,9 @@ export TICKFLOW_ASSIST_ALERT_IMAGE_ENABLED="true"
 - 金十：`flash_monitor_status`
 - 告警：`test_alert`
 
-Hermes 中不再注册第二套插件 slash commands，避免 `/ta_` 与 `/ta-` 重复。正式入口是 Hermes skills 生成的 `/ta-*` 命令；Discord / Telegram / CLI 都可以直接选择或输入 `/ta-addstock`、`/ta-backtest`、`/ta-refreshnames`、`/ta-monitorstatus`、`/ta-testalert`、`/ta-debug`。
+Hermes 中注册 `/ta_` 插件 Slash Commands，handler 直接调用工具并返回 `text`，不会加载 skill，也不会走模型规划。Discord / Telegram / CLI 都可以直接输入 `/ta_addstock`、`/ta_backtest`、`/ta_refreshnames`、`/ta_monitorstatus`、`/ta_testalert`、`/ta_debug`。
 
-Discord 原生命令菜单依赖 bot 以 `applications.commands` scope 邀请，并且 `DISCORD_COMMAND_SYNC_POLICY` 不能为 `off`。如果更新后菜单没有出现，先确认 Discord 里内置 `/model` 是否存在：如果内置命令也没有，通常是 bot 邀请 scope 或同步配置问题；如果只有 TickFlow 命令没有，检查 `~/.hermes/skills/ta-testalert` 是否存在并查看 gateway 启动日志中的 slash command sync 警告。
+如果 Discord 原生 `/` 菜单没有显示插件命令，仍可直接发送 `/ta_watchlist` 这类命令让 Hermes gateway 分发。Discord 菜单是否展示插件 `register_command` 取决于当前 Hermes gateway 的 command sync 实现；本项目不再用 skill 入口换取菜单展示。
 
 ## 数据库兼容
 
