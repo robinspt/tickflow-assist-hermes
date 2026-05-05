@@ -52,7 +52,7 @@ def test_registers_all_declared_tools():
     assert set(ctx.tools) == set(schemas.TOOL_SCHEMAS)
     assert ctx.tools["add_stock"]["toolset"] == "tickflow-assist"
     assert "pre_llm_call" in ctx.hooks
-    assert set(ctx.commands) == {
+    underscore_commands = {
         "ta_addstock",
         "ta_rmstock",
         "ta_analyze",
@@ -74,6 +74,8 @@ def test_registers_all_declared_tools():
         "ta_screenstocks_llm",
         "ta_debug",
     }
+    hyphen_commands = {command.replace("_", "-") for command in underscore_commands}
+    assert set(ctx.commands) == underscore_commands | hyphen_commands
     assert "ta-addstock" not in ctx.skills
     assert "debug_status" in ctx.tools
 
@@ -85,6 +87,7 @@ def test_command_handlers_return_text_field():
     tools.HANDLERS["list_watchlist"] = lambda args: json.dumps({"ok": True, "text": "WATCHLIST"})
     try:
         assert ctx.commands["ta_watchlist"]["handler"]("") == "WATCHLIST"
+        assert ctx.commands["ta-watchlist"]["handler"]("") == "WATCHLIST"
     finally:
         tools.HANDLERS["list_watchlist"] = original
 

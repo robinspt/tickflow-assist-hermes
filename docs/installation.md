@@ -69,6 +69,8 @@ sudo apt install python3-venv
 
 插件提供独立命令 `/ta_addstock`、`/ta_analyze`、`/ta_watchlist` 等。它们由 Hermes 插件 `register_command` 注册，handler 直接调用工具并返回 `text`，不会加载 skill，也不会走模型规划。
 
+插件还会注册同名 `ta-*` 兼容别名，用于适配 Hermes gateway 在 Telegram 分发插件命令时将下划线转换为连字符的查找逻辑；Telegram 菜单仍显示 `/ta_*`，实际执行仍走同一个直接 handler。
+
 - Hermes chat / CLI：直接选择或输入 `/ta_addstock`、`/ta_analyze`、`/ta_testalert` 等。
 - Telegram / Discord：先用 `/commands` 确认列表中有 `/ta_watchlist`、`/ta_testalert` 等命令，然后直接发送 `/ta_*`。
 - 如果 Telegram 回复 `Unknown command /ta_watchlist`，不是插件 handler 报错，而是 gateway 在进入插件前没有识别该命令；先重启 gateway，确认消息端和 Hermes chat / CLI 使用同一个 Hermes profile / `$HOME`，必要时升级 Hermes 到包含插件 `register_command()` gateway 支持的版本。

@@ -58,6 +58,9 @@ def _register_commands(ctx) -> None:
     for command, (tool_name, parser) in COMMAND_MAP.items():
         handler = _make_command_handler(command)
         ctx.register_command(command, handler=handler, description=f"TickFlow Assist {tool_name}")
+        alias = command.replace("_", "-")
+        if alias != command:
+            ctx.register_command(alias, handler=handler, description=f"TickFlow Assist {tool_name}")
 
 
 def _make_command_handler(command: str):
