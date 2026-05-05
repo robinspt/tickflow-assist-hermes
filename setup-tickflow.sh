@@ -51,6 +51,13 @@ VENV_PYTHON="$VENV_DIR/bin/python"
 info "==> 使用虚拟环境：$VENV_DIR"
 "$VENV_PYTHON" -m pip install --upgrade pip
 "$VENV_PYTHON" -m pip install -e "$ROOT_DIR"
+"$VENV_PYTHON" - <<'PY'
+import importlib
+
+for name in ("pandas", "numpy", "lancedb", "pyarrow", "requests", "yaml", "PIL"):
+    importlib.import_module(name)
+print("Python 依赖检查通过")
+PY
 
 info "==> 配置 Hermes 插件目录"
 mkdir -p "$HERMES_PLUGIN_DIR"

@@ -11,15 +11,16 @@ def _bootstrap() -> None:
         sys.path.insert(0, root_text)
     home = Path.home()
     for venv in (root / ".venv", home / ".local" / "share" / "tickflow-assist-hermes" / "venv"):
-        for path in (
+        candidates = [
             venv / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages",
             venv / "Lib" / "site-packages",
-        ):
+        ]
+        candidates.extend(sorted((venv / "lib").glob("python*/site-packages")))
+        for path in candidates:
             if path.exists():
                 text = str(path)
                 if text not in sys.path:
                     sys.path.insert(0, text)
-                return
 
 
 _bootstrap()

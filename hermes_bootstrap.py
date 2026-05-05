@@ -14,6 +14,7 @@ def add_local_venv_site_packages(root: Path) -> None:
                 venv / "Lib" / "site-packages",
             ]
         )
+        candidates.extend(sorted((venv / "lib").glob("python*/site-packages")))
     for path in candidates:
         if path.exists():
             text = str(path)

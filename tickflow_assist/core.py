@@ -10,7 +10,6 @@ from typing import Any
 from .alert_media import AlertCardInput, remove_alert_media, write_alert_card
 from .clients import Jin10Client, MxClient, TickFlowClient, call_llm
 from .config import Config, load_config, supports_financial, supports_intraday
-from .indicators import calculate_indicators
 from .storage import LanceStore, SCHEMAS, json_text
 from .utils import fmt_price, hash_key, is_trading_time, normalize_symbol, now_text, pct, safe_float, safe_int, symbol_code, today_text
 
@@ -60,6 +59,8 @@ class App:
         lines = [f"✅ 已加入自选: {row['name']}（{symbol}）", f"成本价: {fmt_price(row['costPrice']) if row['costPrice'] else '未设置'}"]
         try:
             kline_rows = self.fetch_klines(symbol, count=count, persist=True)
+            from .indicators import calculate_indicators
+
             indicators = calculate_indicators(kline_rows)
             self.store.replace_where("indicators", f"symbol = '{symbol}'", indicators)
             lines.extend([f"📊 已自动获取日K: {len(kline_rows)} 根", f"区间: {kline_rows[0]['trade_date']} ~ {kline_rows[-1]['trade_date']}", f"最新收盘: {kline_rows[-1]['close']:.2f}", "🔧 技术指标已计算并写入数据库"])
@@ -152,6 +153,8 @@ class App:
             try:
                 klines = self.fetch_klines(item["symbol"], count=120, persist=True)
                 if klines:
+                    from .indicators import calculate_indicators
+
                     self.store.replace_where("indicators", f"symbol = '{item['symbol']}'", calculate_indicators(klines))
                 if supports_intraday(self.config.tickflow_api_key_level):
                     try:
@@ -169,6 +172,8 @@ class App:
         klines = self._latest_rows("klines_daily", symbol, "trade_date", 120)
         if not klines:
             klines = self.fetch_klines(symbol, 120)
+            from .indicators import calculate_indicators
+
             self.store.replace_where("indicators", f"symbol = '{symbol}'", calculate_indicators(klines))
         indicators = self._latest_rows("indicators", symbol, "trade_date", 40)
         quote = (self.tickflow.quotes([symbol]) or [{}])[0]

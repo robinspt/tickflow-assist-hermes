@@ -3,14 +3,36 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
-from .core import App
 from .utils import parse_positive_float, parse_positive_int
 
-APP = App()
+_APP: Any = None
+_CTX: Any = None
+
+
+def get_app() -> Any:
+    global _APP
+    if _APP is None:
+        from .core import App
+
+        _APP = App()
+        if _CTX is not None:
+            _APP.set_context(_CTX)
+    return _APP
+
+
+class _AppProxy:
+    def __getattr__(self, name: str) -> Any:
+        return getattr(get_app(), name)
+
+
+APP = _AppProxy()
 
 
 def set_context(ctx: Any) -> None:
-    APP.set_context(ctx)
+    global _CTX
+    _CTX = ctx
+    if _APP is not None:
+        _APP.set_context(ctx)
 
 
 def _ok(text: str, **extra: Any) -> str:
