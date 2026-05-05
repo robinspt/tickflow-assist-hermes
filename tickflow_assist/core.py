@@ -44,6 +44,7 @@ UNIVERSE_CACHE_REFRESH_SECONDS = 24 * 60 * 60
 UNIVERSE_BATCH_SIZE = 50
 SHENWAN_UNIVERSE_PATTERN = re.compile(r"^CN_Equity_(SW[123])_(\d{6})$")
 FLASH_MAX_PAGES_PER_POLL = 5
+FLASH_BACKFILL_PAGES_PER_POLL = 1
 FLASH_INITIAL_SEED_PAGES = 3
 FLASH_PRUNE_INTERVAL_SECONDS = 6 * 60 * 60
 FLASH_ALERT_FRESHNESS_GRACE_SECONDS = 30
@@ -60,6 +61,7 @@ FLASH_DEFAULT_STATE = {
     "lastHeartbeatAt": None,
     "lastPollAt": None,
     "lastPollStored": 0,
+    "lastBackfillStored": 0,
     "lastPollCandidates": 0,
     "lastPollAlerts": 0,
     "lastPrunedAt": None,
@@ -504,7 +506,7 @@ class App:
             f"最近轮询: {state.get('lastPollAt') or '暂无'}",
             f"最近一轮: 入库 {safe_int(state.get('lastPollStored'), 0) or 0} 条 | 候选 {safe_int(state.get('lastPollCandidates'), 0) or 0} 条 | 告警 {safe_int(state.get('lastPollAlerts'), 0) or 0} 条",
             f"今日统计: 入库 {stored_today} 条 | 告警 {alerts_today} 条",
-            f"续页补齐: {'进行中' if state.get('backfillCursor') else '空闲'}",
+            f"续页补齐: {_format_flash_backfill_status(state)}",
             f"最近清理: {state.get('lastPrunedAt') or '暂无'}",
         ]
         if state.get("lastLoopError"):
@@ -544,31 +546,31 @@ class App:
         anchor_url = state.get("lastSeenUrl") or (latest_stored or {}).get("url")
 
         if not self.jin10.configured():
-            state.update({"initialized": state.get("initialized") or bool(anchor_key), "lastSeenKey": anchor_key, "lastSeenPublishedAt": anchor_published_at, "lastSeenUrl": anchor_url, "lastPollAt": now, "lastPollStored": 0, "lastPollCandidates": 0, "lastPollAlerts": 0, "lastLoopError": None, "lastLoopErrorAt": None})
+            state.update({"initialized": state.get("initialized") or bool(anchor_key), "lastSeenKey": anchor_key, "lastSeenPublishedAt": anchor_published_at, "lastSeenUrl": anchor_url, "lastPollAt": now, "lastPollStored": 0, "lastBackfillStored": 0, "lastPollCandidates": 0, "lastPollAlerts": 0, "lastLoopError": None, "lastLoopErrorAt": None})
             self._write_flash_state(state)
             return 0
 
         if not anchor_key and not state.get("initialized"):
             seed = self._fetch_latest_flashes(FLASH_INITIAL_SEED_PAGES, None)
             save = self._save_flash_records(seed["items"])
-            state.update({"initialized": True, "lastSeenKey": (seed.get("latest") or {}).get("flash_key"), "lastSeenPublishedAt": (seed.get("latest") or {}).get("published_at"), "lastSeenUrl": (seed.get("latest") or {}).get("url"), "backfillCursor": None, "lastPollAt": now, "lastPollStored": save["added"], "lastPollCandidates": 0, "lastPollAlerts": 0, "lastLoopError": None, "lastLoopErrorAt": None})
+            state.update({"initialized": True, "lastSeenKey": (seed.get("latest") or {}).get("flash_key"), "lastSeenPublishedAt": (seed.get("latest") or {}).get("published_at"), "lastSeenUrl": (seed.get("latest") or {}).get("url"), "backfillCursor": seed.get("nextCursor"), "lastPollAt": now, "lastPollStored": 0, "lastBackfillStored": save["added"], "lastPollCandidates": 0, "lastPollAlerts": 0, "lastLoopError": None, "lastLoopErrorAt": None})
             self._write_flash_state(state)
             self._maybe_prune_flash_records(state)
             return 0
 
         fetched = self._fetch_latest_flashes(FLASH_MAX_PAGES_PER_POLL, anchor_key)
         backfill_cursor = state.get("backfillCursor") or fetched.get("nextCursor")
-        backfill = self._fetch_flashes_by_cursor(FLASH_MAX_PAGES_PER_POLL, backfill_cursor) if backfill_cursor else None
-        all_items = _merge_flash_records(fetched["items"], (backfill or {}).get("items") or [])
-        save = self._save_flash_records(all_items)
-        new_keys = set(save["addedKeys"])
+        latest_save = self._save_flash_records(fetched["items"])
+        backfill = self._fetch_flashes_by_cursor(FLASH_BACKFILL_PAGES_PER_POLL, backfill_cursor, self._flash_retention_cutoff_ts()) if backfill_cursor else None
+        backfill_save = self._save_flash_records((backfill or {}).get("items") or [])
+        new_keys = set(latest_save["addedKeys"])
         alertable = _filter_alertable_flash_records([item for item in fetched["items"] if item["flash_key"] in new_keys], state.get("lastPollAt"), now_ts, self.config.jin10_flash_poll_interval)
         candidates = _build_flash_candidates(alertable, self.watchlist())
         alerts = 0
         for candidate in candidates:
             alerts += self._handle_flash_candidate(candidate)
         next_backfill_cursor = backfill.get("nextCursor") if backfill is not None else backfill_cursor
-        state.update({"initialized": True, "lastSeenKey": (fetched.get("latest") or {}).get("flash_key") or anchor_key, "lastSeenPublishedAt": (fetched.get("latest") or {}).get("published_at") or anchor_published_at, "lastSeenUrl": (fetched.get("latest") or {}).get("url") or anchor_url, "backfillCursor": next_backfill_cursor, "lastPollAt": now, "lastPollStored": save["added"], "lastPollCandidates": len(candidates), "lastPollAlerts": alerts, "lastLoopError": None, "lastLoopErrorAt": None})
+        state.update({"initialized": True, "lastSeenKey": (fetched.get("latest") or {}).get("flash_key") or anchor_key, "lastSeenPublishedAt": (fetched.get("latest") or {}).get("published_at") or anchor_published_at, "lastSeenUrl": (fetched.get("latest") or {}).get("url") or anchor_url, "backfillCursor": next_backfill_cursor, "lastPollAt": now, "lastPollStored": latest_save["added"], "lastBackfillStored": backfill_save["added"], "lastPollCandidates": len(candidates), "lastPollAlerts": alerts, "lastLoopError": None, "lastLoopErrorAt": None})
         self._write_flash_state(state)
         self._maybe_prune_flash_records(state)
         return alerts
@@ -598,7 +600,7 @@ class App:
             cursor = next_cursor
         return {"items": _sort_flash_records(collected), "latest": latest, "nextCursor": None}
 
-    def _fetch_flashes_by_cursor(self, max_pages: int, initial_cursor: str) -> dict[str, Any]:
+    def _fetch_flashes_by_cursor(self, max_pages: int, initial_cursor: str, min_published_ts: int | None = None) -> dict[str, Any]:
         collected: list[dict[str, Any]] = []
         cursor = initial_cursor
         for page_index in range(max_pages):
@@ -606,7 +608,13 @@ class App:
                 break
             page = self.jin10.list_flash(cursor)
             entries = [_to_flash_record(item) for item in _flash_page_items(page)]
-            collected.extend(item for item in entries if item)
+            valid_entries = [item for item in entries if item]
+            if min_published_ts is not None:
+                collected.extend(item for item in valid_entries if int(item.get("published_ts") or 0) >= min_published_ts)
+                if any(int(item.get("published_ts") or 0) < min_published_ts for item in valid_entries):
+                    return {"items": _sort_flash_records(collected), "latest": None, "nextCursor": None}
+            else:
+                collected.extend(valid_entries)
             next_cursor = _flash_next_cursor(page)
             if not _flash_has_more(page) or not next_cursor:
                 return {"items": _sort_flash_records(collected), "latest": None, "nextCursor": None}
@@ -614,6 +622,9 @@ class App:
                 return {"items": _sort_flash_records(collected), "latest": None, "nextCursor": next_cursor}
             cursor = next_cursor
         return {"items": _sort_flash_records(collected), "latest": None, "nextCursor": cursor}
+
+    def _flash_retention_cutoff_ts(self) -> int:
+        return int((time.time() - self.config.jin10_flash_retention_days * 24 * 60 * 60) * 1000)
 
     def _save_flash_records(self, records: list[dict[str, Any]]) -> dict[str, Any]:
         existing = {row.get("flash_key") for row in self.store.rows("jin10_flash")}
@@ -1302,6 +1313,12 @@ def _flash_next_cursor(page: Any) -> str | None:
     value = page.get("nextCursor") or page.get("next_cursor") or page.get("cursor")
     text = str(value or "").strip()
     return text or None
+
+
+def _format_flash_backfill_status(state: dict[str, Any]) -> str:
+    status = "进行中" if state.get("backfillCursor") else "空闲"
+    added = safe_int(state.get("lastBackfillStored"), 0) or 0
+    return f"{status}（最近补齐 {added} 条）" if added else status
 
 
 def _to_flash_record(item: dict[str, Any]) -> dict[str, Any] | None:

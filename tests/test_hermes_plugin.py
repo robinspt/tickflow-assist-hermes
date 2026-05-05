@@ -318,6 +318,83 @@ def test_flash_monitor_status_renders_runtime_state_and_latest_flash():
     assert "最新快讯:" in text
 
 
+def test_flash_monitor_counts_backfill_separately_from_latest_poll():
+    class MemoryStore:
+        def __init__(self):
+            self.tables = {
+                "watchlist": [],
+                "jin10_flash": [
+                    {
+                        "flash_key": "https://flash.jin10.com/detail/anchor",
+                        "published_at": "2026-05-05 23:00:00",
+                        "published_ts": 1778002800000,
+                        "content": "anchor",
+                        "url": "https://flash.jin10.com/detail/anchor",
+                    }
+                ],
+                "jin10_flash_delivery": [],
+            }
+
+        def rows(self, name):
+            return [dict(row) for row in self.tables.get(name, [])]
+
+        def add(self, name, rows):
+            self.tables.setdefault(name, []).extend(dict(row) for row in rows)
+
+    class FakeJin10:
+        def configured(self):
+            return True
+
+        def list_flash(self, cursor=None):
+            if cursor == "cursor-backfill":
+                return {
+                    "data": {
+                        "items": [
+                            {"content": "历史补齐1", "time": "2026-05-05T22:50:00+08:00", "url": "https://flash.jin10.com/detail/old1"},
+                            {"content": "历史补齐2", "time": "2026-05-05T22:45:00+08:00", "url": "https://flash.jin10.com/detail/old2"},
+                        ],
+                        "next_cursor": "cursor-next",
+                        "has_more": True,
+                    }
+                }
+            return {
+                "data": {
+                    "items": [
+                        {"content": "最新快讯", "time": "2026-05-05T23:05:00+08:00", "url": "https://flash.jin10.com/detail/new1"},
+                        {"content": "anchor", "time": "2026-05-05T23:00:00+08:00", "url": "https://flash.jin10.com/detail/anchor"},
+                    ],
+                    "next_cursor": "cursor-latest",
+                    "has_more": True,
+                }
+            }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        app = App(Config(database_path=tmp, jin10_api_token="token"))
+        app.store = MemoryStore()
+        app.jin10 = FakeJin10()
+        app._write_flash_state(
+            {
+                "initialized": True,
+                "lastSeenKey": "https://flash.jin10.com/detail/anchor",
+                "lastSeenPublishedAt": "2026-05-05 23:00:00",
+                "lastSeenUrl": "https://flash.jin10.com/detail/anchor",
+                "backfillCursor": "cursor-backfill",
+                "lastPollAt": "2026-05-05 23:00:00",
+                "lastPrunedAt": "2999-01-01 00:00:00",
+            }
+        )
+
+        app._flash_monitor_once()
+        state = app._read_flash_state()
+        status = app.flash_monitor_status()
+
+    assert state["lastPollStored"] == 1
+    assert state["lastBackfillStored"] == 2
+    assert state["backfillCursor"] == "cursor-next"
+    assert "最近一轮: 入库 1 条" in status
+    assert "续页补齐: 进行中（最近补齐 2 条）" in status
+
+
 def test_refresh_profiles_uses_tickflow_universes_and_drops_news_titles():
     class MemoryStore:
         def __init__(self, rows):
