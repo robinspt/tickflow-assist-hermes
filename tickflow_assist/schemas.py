@@ -43,4 +43,5 @@ TOOL_SCHEMAS = {
     "push_eastmoney_watchlist": schema("push_eastmoney_watchlist", "Push local watchlist symbols to Eastmoney self-select.", {}),
     "remove_eastmoney_watchlist": schema("remove_eastmoney_watchlist", "Remove a symbol from Eastmoney self-select only.", {"symbol": SYMBOL}, ["symbol"]),
     "flash_monitor_status": schema("flash_monitor_status", "Show Jin10 flash monitor storage/configuration status.", {}),
+    "debug_status": schema("debug_status", "Show TickFlow Assist Hermes runtime diagnostics, dependency status, paths, database path, and alert configuration.", {}),
 }

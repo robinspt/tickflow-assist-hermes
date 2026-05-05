@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 from . import schemas, tools
-from .config import load_config
 
 COMMAND_MAP = {
     "ta_addstock": ("add_stock", lambda s: {"symbol": (s.split() + [""])[0], "costPrice": _part(s, 1), "count": _part(s, 2)}),
@@ -26,6 +25,7 @@ COMMAND_MAP = {
     "ta_testalert": ("test_alert", lambda s: {}),
     "ta_screenstocks": ("screen_stock_candidates", lambda s: {"keyword": s.strip()}),
     "ta_screenstocks_llm": ("screen_stock_candidates", lambda s: {"keyword": s.strip(), "summarize": True}),
+    "ta_debug": ("debug_status", lambda s: {}),
 }
 
 
@@ -51,15 +51,6 @@ def register(ctx):
             if child.is_dir() and skill_md.exists():
                 ctx.register_skill(child.name, skill_md)
     ctx.register_hook("pre_llm_call", _pre_llm_context)
-    _register_commands(ctx)
-
-
-def _register_commands(ctx) -> None:
-    for command, (tool_name, parser) in COMMAND_MAP.items():
-        def handler(raw_args, _command=command):
-            return _run_command_text(_command, raw_args or "")
-        ctx.register_command(command, handler=handler, description=f"TickFlow Assist {tool_name}")
-    ctx.register_command("ta_debug", handler=lambda raw_args: _run_command_text("ta_debug", ""), description="TickFlow Assist debug status")
 
 
 def _part(text: str, index: int):
@@ -87,44 +78,20 @@ def _resolve_ta_command(raw_args: str) -> tuple[str, str] | None:
     return None
 
 
-def _run_command_text(command: str, args: str) -> str:
-    if command == "ta_debug":
-        return _json_text_field(_debug_status())
-    tool_name, parser = COMMAND_MAP[command]
-    return _json_text_field(tools.HANDLERS[tool_name](parser(args or "")))
-
-
-def _json_text_field(payload: str) -> str:
-    try:
-        parsed = json.loads(payload)
-    except Exception:
-        return payload
-    if isinstance(parsed, dict):
-        text = parsed.get("text")
-        if text:
-            return str(text)
-        error = parsed.get("error")
-        if error:
-            return f"⚠️ {error}"
-    return payload
-
-
 def _command_fallback_context(user_message: str) -> str:
     text = user_message.strip()
     if text.startswith("/ta ") or text == "/ta":
-        return "用户输入了 TickFlow Assist 总入口形式。请提示用户直接选择或输入 `/ta_testalert`、`/ta_addstock`、`/ta_analyze`、`/ta_watchlist`、`/ta_monitorstatus`、`/ta_debug` 等独立命令。"
-    if not (text.startswith("/ta_") or text.startswith("ta_")):
+        return "用户输入了 TickFlow Assist 总入口形式。请提示用户直接选择或输入 `/ta-testalert`、`/ta-addstock`、`/ta-analyze`、`/ta-watchlist`、`/ta-monitorstatus`、`/ta-debug` 等独立命令。"
+    if not (text.startswith("/ta_") or text.startswith("ta_") or text.startswith("/ta-") or text.startswith("ta-")):
         return ""
     raw = text[1:] if text.startswith("/") else text
     parsed = _resolve_ta_command(raw)
     if parsed is None:
         return (
-            "用户输入的是 TickFlow Assist 命令格式。请引导用户直接选择或输入 `/ta_addstock`、"
-            "`/ta_analyze`、`/ta_watchlist`、`/ta_monitorstatus`、`/ta_testalert` 或 `/ta_debug`。"
+            "用户输入的是 TickFlow Assist 命令格式。请引导用户直接选择或输入 `/ta-addstock`、"
+            "`/ta-analyze`、`/ta-watchlist`、`/ta-monitorstatus`、`/ta-testalert` 或 `/ta-debug`。"
         )
     command, args = parsed
-    if command == "ta_debug":
-        return "用户输入 `/ta_debug`。请回复用户使用原生命令 `/ta_debug` 查看诊断信息。"
     tool_name, parser = COMMAND_MAP[command]
     tool_args = parser(args)
     return (
@@ -132,42 +99,3 @@ def _command_fallback_context(user_message: str) -> str:
         f"请直接调用工具 `{tool_name}`，参数为 `{json.dumps(tool_args, ensure_ascii=False)}`。"
         "最终回复应优先原样返回工具结果 JSON 的 `text` 字段。"
     )
-
-
-def _debug_status() -> str:
-    diagnostics = tools.runtime_diagnostics()
-    lines = [
-        "🛠 TickFlow 调试信息",
-        "运行方式: Hermes Python plugin",
-        f"Python: {diagnostics['python']}",
-        f"插件目录: {diagnostics['root']}",
-        f"虚拟环境记录: {diagnostics['venv_marker'] or '未记录'}",
-        "依赖状态:",
-    ]
-    for item in diagnostics["dependencies"]:
-        if item["ok"]:
-            version = f" {item['version']}" if item.get("version") else ""
-            origin = f" @ {item['origin']}" if item.get("origin") else ""
-            lines.append(f"  ✅ {item['module']}{version}{origin}")
-        else:
-            lines.append(f"  ❌ {item['module']}: {item['error']}")
-
-    if diagnostics["paths"]:
-        lines.append("Python 路径:")
-        lines.extend(f"  {path}" for path in diagnostics["paths"])
-
-    try:
-        cfg = load_config(Path(__file__).resolve().parents[1])
-        lines.extend(
-            [
-                f"数据库路径: {cfg.database_path}",
-                f"数据库目录存在: {'是' if Path(cfg.database_path).expanduser().exists() else '否'}",
-                f"交易日历: {cfg.calendar_file}",
-                f"轮询间隔: {cfg.request_interval}",
-                f"alertDeliveryTarget: {cfg.alert_delivery_target or '未配置'}",
-                f"alertImageEnabled: {'是' if cfg.alert_image_enabled else '否'}",
-            ]
-        )
-    except Exception as exc:
-        lines.append(f"配置读取: 失败：{exc}")
-    return json.dumps({"ok": True, "text": "\n".join(lines)}, ensure_ascii=False)

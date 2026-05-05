@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
+from .config import load_config
 from .utils import parse_positive_float, parse_positive_int
 
 _APP: Any = None
@@ -226,6 +227,45 @@ def flash_monitor_status(args: dict, **kwargs) -> str:
     return _wrap(lambda a: APP.flash_monitor_status(), args)
 
 
+def debug_status(args: dict, **kwargs) -> str:
+    diagnostics = runtime_diagnostics()
+    lines = [
+        "🛠 TickFlow 调试信息",
+        "运行方式: Hermes Python plugin",
+        f"Python: {diagnostics['python']}",
+        f"插件目录: {diagnostics['root']}",
+        f"虚拟环境记录: {diagnostics['venv_marker'] or '未记录'}",
+        "依赖状态:",
+    ]
+    for item in diagnostics["dependencies"]:
+        if item["ok"]:
+            version = f" {item['version']}" if item.get("version") else ""
+            origin = f" @ {item['origin']}" if item.get("origin") else ""
+            lines.append(f"  ✅ {item['module']}{version}{origin}")
+        else:
+            lines.append(f"  ❌ {item['module']}: {item['error']}")
+
+    if diagnostics["paths"]:
+        lines.append("Python 路径:")
+        lines.extend(f"  {path}" for path in diagnostics["paths"])
+
+    try:
+        cfg = load_config(Path(__file__).resolve().parents[1])
+        lines.extend(
+            [
+                f"数据库路径: {cfg.database_path}",
+                f"数据库目录存在: {'是' if Path(cfg.database_path).expanduser().exists() else '否'}",
+                f"交易日历: {cfg.calendar_file}",
+                f"轮询间隔: {cfg.request_interval}",
+                f"alertDeliveryTarget: {cfg.alert_delivery_target or '未配置'}",
+                f"alertImageEnabled: {'是' if cfg.alert_image_enabled else '否'}",
+            ]
+        )
+    except Exception as exc:
+        lines.append(f"配置读取: 失败：{exc}")
+    return json.dumps({"ok": True, "text": "\n".join(lines)}, ensure_ascii=False)
+
+
 HANDLERS = {
     name: globals()[name]
     for name in [
@@ -237,6 +277,6 @@ HANDLERS = {
         "test_alert", "query_database", "mx_search", "mx_data", "mx_select_stock",
         "screen_stock_candidates", "list_eastmoney_watchlist",
         "sync_eastmoney_watchlist", "push_eastmoney_watchlist",
-        "remove_eastmoney_watchlist", "flash_monitor_status",
+        "remove_eastmoney_watchlist", "flash_monitor_status", "debug_status",
     ]
 }

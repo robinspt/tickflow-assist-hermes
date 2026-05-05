@@ -24,30 +24,30 @@
 
 常用命令：
 
-- `/ta_addstock <symbol> [costPrice] [count]`
-- `/ta_rmstock <symbol>`
-- `/ta_watchlist`
-- `/ta_analyze <symbol>`
-- `/ta_backtest [symbol] [recentLimit]`
-- `/ta_viewanalysis <symbol>`
-- `/ta_refreshnames`
-- `/ta_refreshprofiles [symbol]`
-- `/ta_startmonitor`
-- `/ta_stopmonitor`
-- `/ta_monitorstatus`
-- `/ta_flashstatus`
-- `/ta_startdailyupdate`
-- `/ta_stopdailyupdate`
-- `/ta_updateall`
-- `/ta_dailyupdatestatus`
-- `/ta_testalert`
-- `/ta_screenstocks <自然语言选股条件>`
-- `/ta_screenstocks_llm <自然语言选股条件>`
-- `/ta_debug`
+- `/ta-addstock <symbol> [costPrice] [count]`
+- `/ta-rmstock <symbol>`
+- `/ta-watchlist`
+- `/ta-analyze <symbol>`
+- `/ta-backtest [symbol] [recentLimit]`
+- `/ta-viewanalysis <symbol>`
+- `/ta-refreshnames`
+- `/ta-refreshprofiles [symbol]`
+- `/ta-startmonitor`
+- `/ta-stopmonitor`
+- `/ta-monitorstatus`
+- `/ta-flashstatus`
+- `/ta-startdailyupdate`
+- `/ta-stopdailyupdate`
+- `/ta-updateall`
+- `/ta-dailyupdatestatus`
+- `/ta-testalert`
+- `/ta-screenstocks <自然语言选股条件>`
+- `/ta-screenstocks-llm <自然语言选股条件>`
+- `/ta-debug`
 
-Discord 中这些命令应作为可选择的原生 slash commands 出现在 `/` 菜单。前提是 `setup-tickflow.sh` 已把 `ta_*` skills 链接到 `~/.hermes/skills`，bot 邀请时包含 `applications.commands` scope，`DISCORD_COMMAND_SYNC_POLICY` 没有设为 `off`，并且 gateway 已在插件更新后重启。Telegram 重启 gateway 后会刷新 bot 命令菜单。
+这些命令由 Hermes skills 生成，统一使用 `/ta-*` 形式。本项目不再注册第二套 `/ta_` 插件命令，避免 Hermes chat 中重复显示。Discord 中这些命令应作为可选择的原生 slash commands 出现在 `/` 菜单；前提是 `setup-tickflow.sh` 已把 `ta-*` skills 链接到 `~/.hermes/skills`，bot 邀请时包含 `applications.commands` scope，`DISCORD_COMMAND_SYNC_POLICY` 没有设为 `off`，并且 gateway 已在插件更新后重启。Telegram 重启 gateway 后会刷新 bot 命令菜单。
 
-`/ta_debug` 不依赖 LanceDB 初始化成功也会输出诊断信息，包括 Hermes 当前 Python、虚拟环境记录、关键依赖导入状态和 Python 路径。若 `/plugins` 正常但其他命令提示缺少依赖，优先运行它确认 Hermes 是否加载到了安装脚本创建的虚拟环境。
+`/ta-debug` 不依赖 LanceDB 初始化成功也会输出诊断信息，包括 Hermes 当前 Python、虚拟环境记录、关键依赖导入状态和 Python 路径。若 `/plugins` 正常但其他命令提示缺少依赖，优先运行它确认 Hermes 是否加载到了安装脚本创建的虚拟环境。
 
 ## 本地调试
 

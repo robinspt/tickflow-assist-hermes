@@ -120,7 +120,19 @@ if [ -L "$LEGACY_TA_SKILL_LINK" ]; then
 elif [ -e "$LEGACY_TA_SKILL_LINK" ]; then
   info "检测到 $LEGACY_TA_SKILL_LINK 已存在且不是符号链接；如不再需要 /ta 总入口，请手动处理"
 fi
-for skill_dir in "$ROOT_DIR"/skills/ta_*; do
+for legacy_skill_link in "$HERMES_SKILLS_DIR"/ta_*; do
+  [ -e "$legacy_skill_link" ] || [ -L "$legacy_skill_link" ] || continue
+  if [ -L "$legacy_skill_link" ]; then
+    legacy_target="$(readlink "$legacy_skill_link" || true)"
+    if [[ "$legacy_target" == "$ROOT_DIR"/skills/ta_* ]] || [[ "$legacy_target" == *"tickflow-assist-hermes/skills/ta_"* ]]; then
+      rm "$legacy_skill_link"
+      info "已移除旧 /ta_ skill 链接：$legacy_skill_link"
+    fi
+  else
+    info "检测到 $legacy_skill_link 已存在且不是符号链接；如不再需要 /ta_ 旧入口，请手动处理"
+  fi
+done
+for skill_dir in "$ROOT_DIR"/skills/ta-*; do
   [ -d "$skill_dir" ] || continue
   skill_name="$(basename "$skill_dir")"
   skill_link="$HERMES_SKILLS_DIR/$skill_name"
@@ -132,6 +144,17 @@ for skill_dir in "$ROOT_DIR"/skills/ta_*; do
     ln -s "$skill_dir" "$skill_link"
   fi
 done
+skill_count="$(find "$HERMES_SKILLS_DIR" -maxdepth 1 -type l -name 'ta-*' 2>/dev/null | wc -l | tr -d ' ')"
+info "已安装 TickFlow slash command skills：$skill_count 个"
+
+HERMES_ENV_FILE="${HERMES_ENV_FILE:-$HOME/.hermes/.env}"
+HERMES_CONFIG_FILE="${HERMES_CONFIG_FILE:-$HOME/.hermes/config.yaml}"
+if [ -f "$HERMES_ENV_FILE" ] && grep -Eq '^[[:space:]]*DISCORD_COMMAND_SYNC_POLICY=["'"'"']?off["'"'"']?[[:space:]]*$' "$HERMES_ENV_FILE"; then
+  info "警告：$HERMES_ENV_FILE 中 DISCORD_COMMAND_SYNC_POLICY=off，Discord 原生命令不会同步"
+fi
+if [ -f "$HERMES_CONFIG_FILE" ] && grep -Eq '^[[:space:]]*slash_commands:[[:space:]]*false[[:space:]]*$' "$HERMES_CONFIG_FILE"; then
+  info "警告：$HERMES_CONFIG_FILE 中 slash_commands: false，Discord 原生命令不会同步"
+fi
 
 info "==> 写入本地配置：$CONFIG_FILE"
 "$VENV_PYTHON" "$ROOT_DIR/configure_tickflow.py" "$CONFIG_FILE" "$ROOT_DIR"

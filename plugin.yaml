@@ -32,6 +32,7 @@ provides_tools:
   - push_eastmoney_watchlist
   - remove_eastmoney_watchlist
   - flash_monitor_status
+  - debug_status
 requires_env:
   - name: TICKFLOW_ASSIST_TICKFLOW_API_KEY
     description: TickFlow API key for market data.
