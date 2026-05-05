@@ -53,7 +53,13 @@ class LanceStore:
         return list(names()) if callable(names) else []
 
     def has_table(self, name: str) -> bool:
-        return name in self.table_names()
+        if name in self.table_names():
+            return True
+        try:
+            self.open(name)
+            return True
+        except Exception:
+            return False
 
     def open(self, name: str):
         return self.db.open_table(name)
@@ -81,17 +87,31 @@ class LanceStore:
 
     def replace_where(self, name: str, predicate: str, rows: Iterable[dict[str, Any]]) -> None:
         row_list = list(rows)
-        table = self.ensure(name, row_list or None)
+        normalized = _coerce_rows(name, row_list)
+        if not self.has_table(name):
+            if normalized:
+                try:
+                    self.db.create_table(name, data=normalized, schema=_arrow_schema(name))
+                    return
+                except Exception as exc:
+                    if not _table_already_exists(exc):
+                        raise
+            else:
+                self.ensure(name)
+                return
+        table = self.open(name)
         try:
             table.delete(predicate)
         except Exception:
             pass
-        self.add(name, row_list)
+        if normalized:
+            table.add(normalized)
 
     def rows(self, name: str) -> list[dict[str, Any]]:
-        if not self.has_table(name):
+        try:
+            table = self.open(name)
+        except Exception:
             return []
-        table = self.open(name)
         if hasattr(table, "to_pandas"):
             return _records_from_frame(table.to_pandas())
         if hasattr(table, "search"):
@@ -101,9 +121,10 @@ class LanceStore:
     def schema_description(self, name: str) -> list[dict[str, Any]]:
         if name in SCHEMAS:
             return [{"name": n, "type": t, "nullable": nullable} for n, t, nullable in SCHEMAS[name]]
-        if not self.has_table(name):
+        try:
+            schema = self.open(name).schema
+        except Exception:
             return []
-        schema = self.open(name).schema
         schema = schema() if callable(schema) else schema
         return [{"name": field.name, "type": str(field.type), "nullable": field.nullable} for field in schema]
 

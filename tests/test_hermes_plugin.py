@@ -45,6 +45,29 @@ class DispatchCtx:
         return json.dumps({"success": True})
 
 
+class FakeLanceTable:
+    def __init__(self, rows=None):
+        self.rows = list(rows or [])
+        self.deleted = []
+
+    def delete(self, predicate):
+        self.deleted.append(predicate)
+        if predicate == "symbol = '002261.SZ'":
+            self.rows = [row for row in self.rows if row.get("symbol") != "002261.SZ"]
+
+    def add(self, rows):
+        self.rows.extend(dict(row) for row in rows)
+
+    def search(self):
+        return self
+
+    def limit(self, value):
+        return self
+
+    def to_list(self):
+        return [dict(row) for row in self.rows]
+
+
 def test_registers_all_declared_tools():
     ctx = DummyCtx()
     register(ctx)
@@ -139,6 +162,67 @@ def test_lancestore_ensure_opens_existing_table_when_create_races():
             store = LanceStore(tmp)
             store._db = FakeDb()
             assert store.ensure("watchlist", [{"symbol": "002202.SZ"}]) == {"opened": "watchlist"}
+    finally:
+        storage_module._arrow_schema = original_arrow_schema
+
+
+def test_lancestore_rows_opens_table_when_table_names_are_stale():
+    class FakeDb:
+        def __init__(self):
+            self.table = FakeLanceTable([{"symbol": "002261.SZ", "name": "拓维信息"}])
+
+        def table_names(self):
+            return []
+
+        def open_table(self, name):
+            return self.table
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = LanceStore(tmp)
+        store._db = FakeDb()
+
+        assert store.rows("watchlist")[0]["symbol"] == "002261.SZ"
+
+
+def test_lancestore_replace_where_keeps_rows_on_first_create():
+    class FakeDb:
+        def __init__(self):
+            self.table = None
+
+        def table_names(self):
+            return []
+
+        def create_table(self, name, data=None, schema=None):
+            self.table = FakeLanceTable(data)
+            return self.table
+
+        def open_table(self, name):
+            if self.table is None:
+                raise RuntimeError("missing")
+            return self.table
+
+    original_arrow_schema = storage_module._arrow_schema
+    storage_module._arrow_schema = lambda name: object()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanceStore(tmp)
+            fake_db = FakeDb()
+            store._db = fake_db
+            store.replace_where("watchlist", "symbol = '002261.SZ'", [{"symbol": "002261.SZ", "name": "拓维信息"}])
+
+        assert fake_db.table.rows == [
+            {
+                "symbol": "002261.SZ",
+                "name": "拓维信息",
+                "costPrice": 0.0,
+                "addedAt": "",
+                "sector": None,
+                "themes": None,
+                "themeQuery": None,
+                "themeUpdatedAt": None,
+            }
+        ]
+        assert fake_db.table.deleted == []
     finally:
         storage_module._arrow_schema = original_arrow_schema
 
