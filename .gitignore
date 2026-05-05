@@ -1,6 +1,7 @@
 dist/
 node_modules/
 .venv/
+.tickflow-assist-venv
 data/
 local.config.json
 AGENTS.md

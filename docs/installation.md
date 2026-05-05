@@ -25,6 +25,7 @@ cd tickflow-assist-hermes
 - 检查 Python 版本是否为 `>=3.10`
 - 创建项目内 `.venv`
 - 执行 `.venv/bin/python -m pip install -e .`
+- 写入 `.tickflow-assist-venv`，供 Hermes 运行时定位实际虚拟环境
 - 创建或更新 `~/.hermes/plugins/tickflow-assist` 符号链接
 - 交互式生成或更新 `local.config.json`
 
@@ -58,6 +59,8 @@ sudo apt install python3-venv
 如果报 `Permission denied: .venv`，说明项目目录或已有 `.venv` 权限不属于当前用户，可直接使用上面的 `TICKFLOW_ASSIST_VENV=...` 方式。
 
 重启 Hermes 后，`/plugins` 应能看到 `tickflow-assist`。
+
+如果 `/plugins` 正常，但命令执行时报缺少 `lancedb`、`pandas`、`pyarrow` 等 Python 依赖，请先重新执行 `./setup-tickflow.sh` 并重启 Hermes。脚本会做依赖自检并写入 `.tickflow-assist-venv`；仍失败时运行 `/ta_debug`，把其中的 Python、虚拟环境记录、依赖状态和 Python 路径用于排查。
 
 ## 配置
 

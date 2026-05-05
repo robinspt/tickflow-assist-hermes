@@ -1,23 +1,65 @@
 from __future__ import annotations
 
+import os
+import site
 import sys
 from pathlib import Path
 
 
-def add_local_venv_site_packages(root: Path) -> None:
+def _venv_candidates(root: Path) -> list[Path]:
+    raw_paths: list[str] = []
+    env_path = os.environ.get("TICKFLOW_ASSIST_VENV")
+    if env_path:
+        raw_paths.append(env_path)
+    marker = root / ".tickflow-assist-venv"
+    if marker.exists():
+        try:
+            raw_paths.append(marker.read_text(encoding="utf-8").strip())
+        except OSError:
+            pass
     home = Path.home()
-    candidates = []
-    for venv in (root / ".venv", home / ".local" / "share" / "tickflow-assist-hermes" / "venv"):
-        candidates.extend(
-            [
-                venv / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages",
-                venv / "Lib" / "site-packages",
-            ]
-        )
-        candidates.extend(sorted((venv / "lib").glob("python*/site-packages")))
-    for path in candidates:
-        if path.exists():
-            text = str(path)
-            if text not in sys.path:
-                sys.path.insert(0, text)
-            return
+    raw_paths.extend(
+        [
+            str(root / ".venv"),
+            str(home / ".local" / "share" / "tickflow-assist-hermes" / "venv"),
+        ]
+    )
+
+    seen: set[str] = set()
+    output: list[Path] = []
+    for raw in raw_paths:
+        if not raw:
+            continue
+        path = Path(raw).expanduser()
+        text = str(path)
+        if text not in seen:
+            seen.add(text)
+            output.append(path)
+    return output
+
+
+def _site_packages(venv: Path) -> list[Path]:
+    candidates = [
+        venv / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages",
+        venv / "Lib" / "site-packages",
+    ]
+    candidates.extend(sorted((venv / "lib").glob("python*/site-packages")))
+    return candidates
+
+
+def _add_path(path: Path) -> None:
+    text = str(path)
+    try:
+        site.addsitedir(text)
+    except Exception:
+        pass
+    while text in sys.path:
+        sys.path.remove(text)
+    sys.path.insert(0, text)
+
+
+def add_local_venv_site_packages(root: Path) -> None:
+    for venv in _venv_candidates(root):
+        for path in _site_packages(venv):
+            if path.exists():
+                _add_path(path)

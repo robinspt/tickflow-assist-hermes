@@ -37,7 +37,7 @@ class LanceStore:
             try:
                 import lancedb
             except ImportError as exc:
-                raise RuntimeError("缺少 Python 依赖 lancedb，请先安装项目依赖。") from exc
+                raise RuntimeError("缺少 Python 依赖 lancedb，请重新执行 ./setup-tickflow.sh 并重启 Hermes；若仍失败，请运行 /ta_debug 查看 Python 路径。") from exc
             self._db = lancedb.connect(str(self.path))
         return self._db
 

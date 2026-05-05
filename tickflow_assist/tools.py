@@ -1,12 +1,24 @@
 from __future__ import annotations
 
+from importlib import metadata, util
 import json
+import sys
+from pathlib import Path
 from typing import Any, Callable
 
 from .utils import parse_positive_float, parse_positive_int
 
 _APP: Any = None
 _CTX: Any = None
+_DEPENDENCIES = [
+    ("lancedb", "lancedb"),
+    ("pyarrow", "pyarrow"),
+    ("pandas", "pandas"),
+    ("numpy", "numpy"),
+    ("requests", "requests"),
+    ("yaml", "pyyaml"),
+    ("PIL", "pillow"),
+]
 
 
 def get_app() -> Any:
@@ -33,6 +45,49 @@ def set_context(ctx: Any) -> None:
     _CTX = ctx
     if _APP is not None:
         _APP.set_context(ctx)
+
+
+def runtime_diagnostics() -> dict[str, Any]:
+    root = Path(__file__).resolve().parents[1]
+    marker = root / ".tickflow-assist-venv"
+    dependencies = []
+    for module_name, package_name in _DEPENDENCIES:
+        item = {"module": module_name, "package": package_name, "ok": False, "version": None, "origin": None, "error": None}
+        try:
+            spec = util.find_spec(module_name)
+            if spec is None:
+                item["error"] = "not found"
+                dependencies.append(item)
+                continue
+            item["ok"] = True
+            item["origin"] = spec.origin
+        except Exception as exc:
+            item["error"] = f"{type(exc).__name__}: {exc}"
+        try:
+            item["version"] = metadata.version(package_name)
+        except Exception:
+            pass
+        dependencies.append(item)
+
+    marker_text = ""
+    if marker.exists():
+        try:
+            marker_text = marker.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            marker_text = f"读取失败: {exc}"
+
+    interesting_paths = []
+    for path in sys.path:
+        if "tickflow-assist" in path or ".venv" in path or "site-packages" in path:
+            interesting_paths.append(path)
+
+    return {
+        "python": sys.executable,
+        "root": str(root),
+        "venv_marker": marker_text,
+        "dependencies": dependencies,
+        "paths": interesting_paths[:30],
+    }
 
 
 def _ok(text: str, **extra: Any) -> str:

@@ -10,6 +10,7 @@ VENV_DIR="${TICKFLOW_ASSIST_VENV:-$DEFAULT_VENV_DIR}"
 HERMES_PLUGIN_DIR="${HERMES_PLUGIN_DIR:-$HOME/.hermes/plugins}"
 PLUGIN_LINK="$HERMES_PLUGIN_DIR/$PLUGIN_NAME"
 CONFIG_FILE="$ROOT_DIR/local.config.json"
+VENV_MARKER_FILE="$ROOT_DIR/.tickflow-assist-venv"
 
 info() {
   printf '%s\n' "$*"
@@ -47,6 +48,7 @@ if [ ! -x "$VENV_DIR/bin/python" ]; then
   fi
 fi
 
+VENV_DIR="$(cd "$VENV_DIR" && pwd)"
 VENV_PYTHON="$VENV_DIR/bin/python"
 info "==> 使用虚拟环境：$VENV_DIR"
 "$VENV_PYTHON" -m pip install --upgrade pip
@@ -58,6 +60,11 @@ for name in ("pandas", "numpy", "lancedb", "pyarrow", "requests", "yaml", "PIL")
     importlib.import_module(name)
 print("Python 依赖检查通过")
 PY
+if (umask 077; printf '%s\n' "$VENV_DIR" > "$VENV_MARKER_FILE"); then
+  info "==> 已记录虚拟环境路径：$VENV_MARKER_FILE"
+else
+  info "==> 无法写入虚拟环境路径记录；如 Hermes 找不到依赖，请设置 TICKFLOW_ASSIST_VENV=$VENV_DIR"
+fi
 
 info "==> 配置 Hermes 插件目录"
 mkdir -p "$HERMES_PLUGIN_DIR"

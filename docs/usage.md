@@ -45,6 +45,8 @@
 - `/ta_screenstocks_llm <自然语言选股条件>`
 - `/ta_debug`
 
+`/ta_debug` 不依赖 LanceDB 初始化成功也会输出诊断信息，包括 Hermes 当前 Python、虚拟环境记录、关键依赖导入状态和 Python 路径。若 `/plugins` 正常但其他命令提示缺少依赖，优先运行它确认 Hermes 是否加载到了安装脚本创建的虚拟环境。
+
 ## 本地调试
 
 当前版本是 Hermes Python 插件，不再提供 npm CLI。可用 Hermes 工具调用，或在 Python 里直接导入：
