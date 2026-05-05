@@ -423,6 +423,7 @@ class App:
                     symbol="000001.SZ",
                     current_price=12.36,
                     trigger_price=12.18,
+                    cost_price=11.80,
                     note="用于验证 Hermes send_message 文本与 MEDIA PNG 投递链路。",
                     points=[("09:30", 12.02), ("10:00", 12.08), ("10:30", 12.12), ("11:30", 12.15), ("13:00", 12.19), ("13:30", 12.23), ("14:00", 12.27), ("14:12", 12.36)],
                     levels={"support": 12.08, "resistance": 12.30, "breakthrough": 12.18, "take_profit": 12.68, "stop_loss": 11.86},
@@ -514,6 +515,7 @@ class App:
                                 symbol=item["symbol"],
                                 current_price=price,
                                 trigger_price=target,
+                                cost_price=safe_float(item.get("costPrice")),
                                 note=message,
                                 points=self._alert_points(item["symbol"], price),
                                 levels={
@@ -540,10 +542,16 @@ class App:
         symbol: str,
         current_price: float,
         trigger_price: float,
+        cost_price: float | None = None,
         note: str,
         points: list[tuple[str, float]],
         levels: dict[str, float | None],
     ) -> Path:
+        change_pct = None
+        if len(points) >= 2 and points[0][1]:
+            change_pct = ((points[-1][1] - points[0][1]) / abs(points[0][1])) * 100
+        distance_pct = ((current_price - trigger_price) / abs(trigger_price)) * 100 if trigger_price else None
+        profit_pct = ((current_price - cost_price) / abs(cost_price)) * 100 if cost_price else None
         return write_alert_card(
             self.config.database_path,
             AlertCardInput(
@@ -556,6 +564,11 @@ class App:
                 note=note,
                 points=points,
                 levels=levels,
+                cost_price=cost_price,
+                change_pct=change_pct,
+                distance_pct=distance_pct,
+                profit_pct=profit_pct,
+                timestamp_label=f"Hermes | {now_text()}",
             ),
         )
 

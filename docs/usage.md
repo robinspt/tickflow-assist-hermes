@@ -24,6 +24,7 @@
 
 常用命令：
 
+- `/ta <subcommand> [args]`
 - `/ta_addstock <symbol> [costPrice] [count]`
 - `/ta_rmstock <symbol>`
 - `/ta_watchlist`
@@ -44,6 +45,17 @@
 - `/ta_screenstocks <自然语言选股条件>`
 - `/ta_screenstocks_llm <自然语言选股条件>`
 - `/ta_debug`
+
+`/ta` 是跨 Discord / Telegram / CLI 的统一入口，常见用法：
+
+- `/ta addstock 002202 30.5`
+- `/ta analyze 002202`
+- `/ta watchlist`
+- `/ta monitorstatus`
+- `/ta testalert`
+- `/ta debug`
+
+Discord 中如果细分 `/ta_*` 没出现在原生命令菜单，使用 `/ta` 加参数。Telegram 重启 gateway 后会刷新 bot 命令菜单，`/ta` 和旧的 `/ta_*` 都可以使用。
 
 `/ta_debug` 不依赖 LanceDB 初始化成功也会输出诊断信息，包括 Hermes 当前 Python、虚拟环境记录、关键依赖导入状态和 Python 路径。若 `/plugins` 正常但其他命令提示缺少依赖，优先运行它确认 Hermes 是否加载到了安装脚本创建的虚拟环境。
 
@@ -71,3 +83,5 @@ print(add_stock({"symbol": "002261", "costPrice": 34.15}))
 状态文件仍放在 `databasePath` 下，便于 `monitor_status` 和 `daily_update_status` 查看。
 
 告警投递使用 `alertDeliveryTarget`，格式参考 Hermes delivery targets，例如 `telegram`、`telegram:-1001234567890`、`telegram:-1001234567890:17585`、`discord:999888777`。文本消息通过 Hermes `send_message` 发送；PNG 告警卡通过消息中的 `MEDIA:/path/to/file` 附加。
+
+告警 PNG 版式复刻迁移前的 TickFlow 原版样式：市场涨跌背景、右上信号标签、左侧日内曲线、右侧关键价位和底部位阶带。Python 版会自动截断过长文本并错开位阶标签，避免文字重叠。

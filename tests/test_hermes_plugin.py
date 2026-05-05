@@ -50,6 +50,7 @@ def test_registers_all_declared_tools():
     assert ctx.tools["add_stock"]["toolset"] == "tickflow-assist"
     assert "pre_llm_call" in ctx.hooks
     assert set(ctx.commands) == {
+        "ta",
         "ta_addstock",
         "ta_rmstock",
         "ta_analyze",
@@ -71,6 +72,7 @@ def test_registers_all_declared_tools():
         "ta_screenstocks_llm",
         "ta_debug",
     }
+    assert "ta" in ctx.skills
 
 
 def test_lancedb_schema_keeps_existing_fields():

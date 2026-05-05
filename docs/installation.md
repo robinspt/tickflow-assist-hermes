@@ -58,9 +58,17 @@ sudo apt install python3-venv
 
 如果报 `Permission denied: .venv`，说明项目目录或已有 `.venv` 权限不属于当前用户，可直接使用上面的 `TICKFLOW_ASSIST_VENV=...` 方式。
 
-重启 Hermes 后，`/plugins` 应能看到 `tickflow-assist`。
+重启 Hermes gateway 后，`/plugins` 应能看到 `tickflow-assist`。Discord / Telegram 的命令菜单会在 gateway 启动时刷新；如果菜单没有立刻变化，执行 `hermes gateway restart` 或在聊天里用 `/restart`。
 
 如果 `/plugins` 正常，但命令执行时报缺少 `lancedb`、`pandas`、`pyarrow` 等 Python 依赖，请先重新执行 `./setup-tickflow.sh` 并重启 Hermes。脚本会优先使用 Hermes 自己的 Python，并在已有 `.venv` Python 版本不匹配时自动挪走旧环境后重建；仍失败时运行 `/ta_debug`，把其中的 Python、虚拟环境记录、依赖状态和 Python 路径用于排查。
+
+### Discord / Telegram 命令验证
+
+插件注册统一命令 `/ta`，同时保留旧命令 `/ta_addstock`、`/ta_analyze`、`/ta_watchlist` 等。
+
+- Discord：优先使用 `/ta addstock 002202`、`/ta analyze 002202`、`/ta testalert`。如果细分 `/ta_*` 不出现在 Discord 原生命令菜单中，使用 `/ta`。
+- Telegram：重启 gateway 后 bot 菜单会刷新，可使用 `/ta` 或旧的 `/ta_*` 命令；群聊里如果启用了 `telegram.require_mention`，slash command 仍会作为有效触发。
+- CLI：继续支持 `/ta_*` 与 `/ta`。
 
 ## 配置
 
