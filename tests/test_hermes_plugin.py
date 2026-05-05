@@ -9,6 +9,8 @@ from tickflow_assist.alert_media import _normalize_points, _scale_trading_x
 from tickflow_assist.config import Config, load_config
 from tickflow_assist.core import App
 from tickflow_assist.plugin import register
+import tickflow_assist.storage as storage_module
+from tickflow_assist.storage import LanceStore
 from tickflow_assist.storage import SCHEMAS
 
 
@@ -114,6 +116,28 @@ def test_lancedb_schema_keeps_existing_fields():
         "analysis_text",
         "score",
     ]
+
+
+def test_lancestore_ensure_opens_existing_table_when_create_races():
+    class FakeDb:
+        def table_names(self):
+            return []
+
+        def create_table(self, name, data=None, schema=None):
+            raise RuntimeError(f"Table '{name}' already exists")
+
+        def open_table(self, name):
+            return {"opened": name}
+
+    original_arrow_schema = storage_module._arrow_schema
+    storage_module._arrow_schema = lambda name: object()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanceStore(tmp)
+            store._db = FakeDb()
+            assert store.ensure("watchlist", [{"symbol": "002202.SZ"}]) == {"opened": "watchlist"}
+    finally:
+        storage_module._arrow_schema = original_arrow_schema
 
 
 def test_alert_delivery_target_uses_hermes_format_only():

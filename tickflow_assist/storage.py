@@ -62,7 +62,12 @@ class LanceStore:
         if self.has_table(name):
             return self.open(name)
         rows = rows or [_empty_row(name)]
-        table = self.db.create_table(name, data=_coerce_rows(name, rows), schema=_arrow_schema(name))
+        try:
+            table = self.db.create_table(name, data=_coerce_rows(name, rows), schema=_arrow_schema(name))
+        except Exception as exc:
+            if _table_already_exists(exc):
+                return self.open(name)
+            raise
         if rows and rows == [_empty_row(name)]:
             table.delete(_all_rows_predicate())
         return table
@@ -156,3 +161,8 @@ def _coerce_rows(name: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _all_rows_predicate() -> str:
     return "1 = 1"
+
+
+def _table_already_exists(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "already exists" in text and "table" in text

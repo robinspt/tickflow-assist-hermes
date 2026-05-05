@@ -56,9 +56,15 @@ def register(ctx):
 
 def _register_commands(ctx) -> None:
     for command, (tool_name, parser) in COMMAND_MAP.items():
-        def handler(raw_args, _command=command):
-            return _run_command_text(_command, raw_args or "")
+        handler = _make_command_handler(command)
         ctx.register_command(command, handler=handler, description=f"TickFlow Assist {tool_name}")
+
+
+def _make_command_handler(command: str):
+    def handler(raw_args: str) -> str:
+        return _run_command_text(command, raw_args or "")
+
+    return handler
 
 
 def _part(text: str, index: int):

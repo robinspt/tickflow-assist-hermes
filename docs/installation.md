@@ -61,7 +61,7 @@ sudo apt install python3-venv
 
 如果报 `Permission denied: .venv`，说明项目目录或已有 `.venv` 权限不属于当前用户，可直接使用上面的 `TICKFLOW_ASSIST_VENV=...` 方式。
 
-重启 Hermes gateway 后，`/plugins` 应能看到 `tickflow-assist`。Discord / Telegram 的命令菜单会在 gateway 启动时刷新；如果菜单没有立刻变化，执行 `hermes gateway restart` 或在聊天里用 `/restart`。Discord 全局命令可能有短暂传播延迟。
+重启 Hermes gateway 后，Hermes chat / CLI 的 `/plugins` 应能看到 `tickflow-assist`。Telegram / Discord 消息端可用 `/commands` 查看 gateway 当前命令；如果 `/ta_*` 不在列表里，说明 gateway 尚未加载插件命令，执行 `hermes gateway restart` 或在聊天里用 `/restart`。Discord 全局命令可能有短暂传播延迟。
 
 如果 `/plugins` 正常，但命令执行时报缺少 `lancedb`、`pandas`、`pyarrow` 等 Python 依赖，请先重新执行 `./setup-tickflow.sh` 并重启 Hermes。脚本会优先使用 Hermes 自己的 Python，并在已有 `.venv` Python 版本不匹配时自动挪走旧环境后重建；仍失败时运行 `/ta_debug`，把其中的 Python、虚拟环境记录、依赖状态和 Python 路径用于排查。
 
@@ -70,13 +70,13 @@ sudo apt install python3-venv
 插件提供独立命令 `/ta_addstock`、`/ta_analyze`、`/ta_watchlist` 等。它们由 Hermes 插件 `register_command` 注册，handler 直接调用工具并返回 `text`，不会加载 skill，也不会走模型规划。
 
 - Hermes chat / CLI：直接选择或输入 `/ta_addstock`、`/ta_analyze`、`/ta_testalert` 等。
-- Telegram：重启 gateway 后 bot 菜单会刷新，可使用 `/ta_*` 命令；群聊里如果启用了 `telegram.require_mention`，slash command 仍会作为有效触发。
-- Discord：如果原生 `/` 菜单未显示插件命令，仍可直接发送 `/ta_watchlist` 这类命令让 Hermes gateway 分发。Discord 菜单是否展示插件 `register_command` 取决于当前 Hermes gateway 的 command sync 实现；本项目不再用 skill 入口换取菜单展示。
+- Telegram / Discord：先用 `/commands` 确认列表中有 `/ta_watchlist`、`/ta_testalert` 等命令，然后直接发送 `/ta_*`。
+- 如果 Telegram 回复 `Unknown command /ta_watchlist`，不是插件 handler 报错，而是 gateway 在进入插件前没有识别该命令；先重启 gateway，确认消息端和 Hermes chat / CLI 使用同一个 Hermes profile / `$HOME`，必要时升级 Hermes 到包含插件 `register_command()` gateway 支持的版本。
 
 如果 Discord 里仍看不到命令：
 
 - 先看 Discord `/` 菜单是否有 Hermes 内置 `/model`。如果内置命令也没有，通常是 bot 没有用 `applications.commands` scope 邀请，或 `DISCORD_COMMAND_SYNC_POLICY=off` / `slash_commands: false` 禁用了同步。
-- 如果内置命令存在但 `/ta_*` 不存在，先直接发送 `/ta_watchlist` 验证 gateway 分发；这不会走 skill。
+- 如果内置命令存在但 `/ta_*` 不存在，说明当前 gateway 没有加载插件命令；检查插件是否启用、gateway 是否重启，以及消息端 gateway 是否运行在同一个 `~/.hermes`。
 - 如必须要 Discord 菜单可选择且 Hermes 版本不支持插件命令同步，只能使用 skill 入口，但会有额外加载和 token 开销。
 
 ## 配置
