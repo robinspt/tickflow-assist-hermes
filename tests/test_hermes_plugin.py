@@ -4,7 +4,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from tickflow_assist import schemas
+from tickflow_assist import schemas, tools
 from tickflow_assist.config import Config, load_config
 from tickflow_assist.core import App
 from tickflow_assist.plugin import register
@@ -50,7 +50,6 @@ def test_registers_all_declared_tools():
     assert ctx.tools["add_stock"]["toolset"] == "tickflow-assist"
     assert "pre_llm_call" in ctx.hooks
     assert set(ctx.commands) == {
-        "ta",
         "ta_addstock",
         "ta_rmstock",
         "ta_analyze",
@@ -72,7 +71,20 @@ def test_registers_all_declared_tools():
         "ta_screenstocks_llm",
         "ta_debug",
     }
-    assert "ta" in ctx.skills
+    assert "ta_addstock" in ctx.skills
+    assert "ta_testalert" in ctx.skills
+    assert "ta_debug" in ctx.skills
+
+
+def test_command_handlers_return_text_field():
+    ctx = DummyCtx()
+    register(ctx)
+    original = tools.HANDLERS["list_watchlist"]
+    tools.HANDLERS["list_watchlist"] = lambda args: json.dumps({"ok": True, "text": "WATCHLIST"})
+    try:
+        assert ctx.commands["ta_watchlist"]["handler"]("") == "WATCHLIST"
+    finally:
+        tools.HANDLERS["list_watchlist"] = original
 
 
 def test_lancedb_schema_keeps_existing_fields():

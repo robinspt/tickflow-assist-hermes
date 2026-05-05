@@ -24,7 +24,6 @@
 
 常用命令：
 
-- `/ta <subcommand> [args]`
 - `/ta_addstock <symbol> [costPrice] [count]`
 - `/ta_rmstock <symbol>`
 - `/ta_watchlist`
@@ -46,16 +45,7 @@
 - `/ta_screenstocks_llm <自然语言选股条件>`
 - `/ta_debug`
 
-`/ta` 是跨 Discord / Telegram / CLI 的统一入口，常见用法：
-
-- `/ta addstock 002202 30.5`
-- `/ta analyze 002202`
-- `/ta watchlist`
-- `/ta monitorstatus`
-- `/ta testalert`
-- `/ta debug`
-
-Discord 中如果细分 `/ta_*` 没出现在原生命令菜单，使用 `/ta` 加参数。Telegram 重启 gateway 后会刷新 bot 命令菜单，`/ta` 和旧的 `/ta_*` 都可以使用。
+Discord 中这些命令应作为可选择的原生 slash commands 出现在 `/` 菜单。前提是 `setup-tickflow.sh` 已把 `ta_*` skills 链接到 `~/.hermes/skills`，bot 邀请时包含 `applications.commands` scope，`DISCORD_COMMAND_SYNC_POLICY` 没有设为 `off`，并且 gateway 已在插件更新后重启。Telegram 重启 gateway 后会刷新 bot 命令菜单。
 
 `/ta_debug` 不依赖 LanceDB 初始化成功也会输出诊断信息，包括 Hermes 当前 Python、虚拟环境记录、关键依赖导入状态和 Python 路径。若 `/plugins` 正常但其他命令提示缺少依赖，优先运行它确认 Hermes 是否加载到了安装脚本创建的虚拟环境。
 

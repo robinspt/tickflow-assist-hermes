@@ -17,6 +17,7 @@ DEFAULT_VENV_DIR="$ROOT_DIR/.venv"
 FALLBACK_VENV_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/tickflow-assist-hermes/venv"
 VENV_DIR="${TICKFLOW_ASSIST_VENV:-$DEFAULT_VENV_DIR}"
 HERMES_PLUGIN_DIR="${HERMES_PLUGIN_DIR:-$HOME/.hermes/plugins}"
+HERMES_SKILLS_DIR="${HERMES_SKILLS_DIR:-$HOME/.hermes/skills}"
 PLUGIN_LINK="$HERMES_PLUGIN_DIR/$PLUGIN_NAME"
 CONFIG_FILE="$ROOT_DIR/local.config.json"
 VENV_MARKER_FILE="$ROOT_DIR/.tickflow-assist-venv"
@@ -107,8 +108,33 @@ else
   ln -s "$ROOT_DIR" "$PLUGIN_LINK"
 fi
 
+info "==> 配置 Hermes Discord/Telegram 命令 skills"
+mkdir -p "$HERMES_SKILLS_DIR"
+LEGACY_TA_SKILL_LINK="$HERMES_SKILLS_DIR/ta"
+if [ -L "$LEGACY_TA_SKILL_LINK" ]; then
+  LEGACY_TA_TARGET="$(readlink "$LEGACY_TA_SKILL_LINK" || true)"
+  if [ "$LEGACY_TA_TARGET" = "$ROOT_DIR/skills/ta" ] || [ "$LEGACY_TA_TARGET" = "$ROOT_DIR/skills/ta/" ] || [[ "$LEGACY_TA_TARGET" == *"tickflow-assist-hermes/skills/ta" ]]; then
+    rm "$LEGACY_TA_SKILL_LINK"
+    info "已移除旧 /ta 总入口 skill 链接：$LEGACY_TA_SKILL_LINK"
+  fi
+elif [ -e "$LEGACY_TA_SKILL_LINK" ]; then
+  info "检测到 $LEGACY_TA_SKILL_LINK 已存在且不是符号链接；如不再需要 /ta 总入口，请手动处理"
+fi
+for skill_dir in "$ROOT_DIR"/skills/ta_*; do
+  [ -d "$skill_dir" ] || continue
+  skill_name="$(basename "$skill_dir")"
+  skill_link="$HERMES_SKILLS_DIR/$skill_name"
+  if [ -L "$skill_link" ]; then
+    ln -sfn "$skill_dir" "$skill_link"
+  elif [ -e "$skill_link" ]; then
+    info "跳过 $skill_link：已存在且不是符号链接，请手动处理后再运行安装脚本"
+  else
+    ln -s "$skill_dir" "$skill_link"
+  fi
+done
+
 info "==> 写入本地配置：$CONFIG_FILE"
 "$VENV_PYTHON" "$ROOT_DIR/configure_tickflow.py" "$CONFIG_FILE" "$ROOT_DIR"
 
 info ""
-info "安装完成。请重启 Hermes，然后在会话里运行 /plugins 确认 tickflow-assist 已加载。"
+info "安装完成。请重启 Hermes gateway，然后在会话里运行 /plugins 确认 tickflow-assist 已加载，并等待 Discord/Telegram slash commands 同步。"

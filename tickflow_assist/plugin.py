@@ -28,44 +28,6 @@ COMMAND_MAP = {
     "ta_screenstocks_llm": ("screen_stock_candidates", lambda s: {"keyword": s.strip(), "summarize": True}),
 }
 
-TA_ALIASES = {
-    "add": "ta_addstock",
-    "addstock": "ta_addstock",
-    "rm": "ta_rmstock",
-    "remove": "ta_rmstock",
-    "rmstock": "ta_rmstock",
-    "analyze": "ta_analyze",
-    "backtest": "ta_backtest",
-    "view": "ta_viewanalysis",
-    "viewanalysis": "ta_viewanalysis",
-    "watch": "ta_watchlist",
-    "watchlist": "ta_watchlist",
-    "list": "ta_watchlist",
-    "refreshnames": "ta_refreshnames",
-    "refreshprofiles": "ta_refreshprofiles",
-    "monitor": "ta_monitorstatus",
-    "monitorstatus": "ta_monitorstatus",
-    "flash": "ta_flashstatus",
-    "flashstatus": "ta_flashstatus",
-    "startmonitor": "ta_startmonitor",
-    "stopmonitor": "ta_stopmonitor",
-    "update": "ta_updateall",
-    "updateall": "ta_updateall",
-    "daily": "ta_dailyupdatestatus",
-    "dailyupdatestatus": "ta_dailyupdatestatus",
-    "startdaily": "ta_startdailyupdate",
-    "startdailyupdate": "ta_startdailyupdate",
-    "stopdaily": "ta_stopdailyupdate",
-    "stopdailyupdate": "ta_stopdailyupdate",
-    "test": "ta_testalert",
-    "testalert": "ta_testalert",
-    "screen": "ta_screenstocks",
-    "screenstocks": "ta_screenstocks",
-    "screenllm": "ta_screenstocks_llm",
-    "screenstocks_llm": "ta_screenstocks_llm",
-    "debug": "ta_debug",
-}
-
 
 def _pre_llm_context(**kwargs):
     user_message = str(kwargs.get("user_message") or "")
@@ -93,12 +55,11 @@ def register(ctx):
 
 
 def _register_commands(ctx) -> None:
-    ctx.register_command("ta", handler=_handle_ta_command, description="TickFlow Assist command router, e.g. /ta addstock 002202")
     for command, (tool_name, parser) in COMMAND_MAP.items():
-        def handler(raw_args, _tool_name=tool_name, _parser=parser):
-            return tools.HANDLERS[_tool_name](_parser(raw_args or ""))
+        def handler(raw_args, _command=command):
+            return _run_command_text(_command, raw_args or "")
         ctx.register_command(command, handler=handler, description=f"TickFlow Assist {tool_name}")
-    ctx.register_command("ta_debug", handler=lambda raw_args: _debug_status(), description="TickFlow Assist debug status")
+    ctx.register_command("ta_debug", handler=lambda raw_args: _run_command_text("ta_debug", ""), description="TickFlow Assist debug status")
 
 
 def _part(text: str, index: int):
@@ -115,68 +76,55 @@ def _parse_backtest_args(text: str) -> dict:
     return {"symbol": parts[0], "recentLimit": parts[1] if len(parts) > 1 else None}
 
 
-def _handle_ta_command(raw_args: str) -> str:
-    parsed = _resolve_ta_command(raw_args)
-    if parsed is None:
-        return _ta_help()
-    command, args = parsed
-    if command == "ta_debug":
-        return _debug_status()
-    tool_name, parser = COMMAND_MAP[command]
-    return tools.HANDLERS[tool_name](parser(args))
-
-
 def _resolve_ta_command(raw_args: str) -> tuple[str, str] | None:
     text = (raw_args or "").strip()
     if not text:
         return None
     first, _, rest = text.partition(" ")
     normalized = first.strip().lstrip("/").replace("-", "_").lower()
-    if normalized == "ta":
-        return _resolve_ta_command(rest)
     if normalized in COMMAND_MAP or normalized == "ta_debug":
         return normalized, rest
-    if normalized.startswith("ta_") and normalized in COMMAND_MAP:
-        return normalized, rest
-    aliased = TA_ALIASES.get(normalized)
-    if aliased:
-        return aliased, rest
     return None
 
 
-def _ta_help() -> str:
-    return json.dumps(
-        {
-            "ok": True,
-            "text": (
-                "TickFlow Assist 命令用法:\n"
-                "/ta addstock 002202 [costPrice] [count]\n"
-                "/ta analyze 002202\n"
-                "/ta watchlist\n"
-                "/ta monitorstatus\n"
-                "/ta testalert\n"
-                "/ta debug\n"
-                "也可继续使用旧命令，如 /ta_addstock 002202。"
-            ),
-        },
-        ensure_ascii=False,
-    )
+def _run_command_text(command: str, args: str) -> str:
+    if command == "ta_debug":
+        return _json_text_field(_debug_status())
+    tool_name, parser = COMMAND_MAP[command]
+    return _json_text_field(tools.HANDLERS[tool_name](parser(args or "")))
+
+
+def _json_text_field(payload: str) -> str:
+    try:
+        parsed = json.loads(payload)
+    except Exception:
+        return payload
+    if isinstance(parsed, dict):
+        text = parsed.get("text")
+        if text:
+            return str(text)
+        error = parsed.get("error")
+        if error:
+            return f"⚠️ {error}"
+    return payload
 
 
 def _command_fallback_context(user_message: str) -> str:
     text = user_message.strip()
-    if not (text.startswith("/ta") or text.startswith("ta ")):
+    if text.startswith("/ta ") or text == "/ta":
+        return "用户输入了 TickFlow Assist 总入口形式。请提示用户直接选择或输入 `/ta_testalert`、`/ta_addstock`、`/ta_analyze`、`/ta_watchlist`、`/ta_monitorstatus`、`/ta_debug` 等独立命令。"
+    if not (text.startswith("/ta_") or text.startswith("ta_")):
         return ""
     raw = text[1:] if text.startswith("/") else text
     parsed = _resolve_ta_command(raw)
     if parsed is None:
         return (
-            "用户输入的是 TickFlow Assist 命令格式。请引导用户使用 `/ta addstock 002202`、"
-            "`/ta analyze 002202`、`/ta watchlist`、`/ta monitorstatus`、`/ta testalert` 或 `/ta debug`。"
+            "用户输入的是 TickFlow Assist 命令格式。请引导用户直接选择或输入 `/ta_addstock`、"
+            "`/ta_analyze`、`/ta_watchlist`、`/ta_monitorstatus`、`/ta_testalert` 或 `/ta_debug`。"
         )
     command, args = parsed
     if command == "ta_debug":
-        return "用户输入 `/ta debug` 或 `/ta_debug`。请回复用户使用原生命令 `/ta_debug` 或 `/ta debug` 查看诊断信息。"
+        return "用户输入 `/ta_debug`。请回复用户使用原生命令 `/ta_debug` 查看诊断信息。"
     tool_name, parser = COMMAND_MAP[command]
     tool_args = parser(args)
     return (

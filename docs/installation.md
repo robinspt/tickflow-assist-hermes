@@ -27,6 +27,8 @@ cd tickflow-assist-hermes
 - 执行 `.venv/bin/python -m pip install -e .`
 - 写入 `.tickflow-assist-venv`，供 Hermes 运行时定位实际虚拟环境
 - 创建或更新 `~/.hermes/plugins/tickflow-assist` 符号链接
+- 创建或更新 `~/.hermes/skills/ta_*` 符号链接，供 Discord 原生命令菜单同步
+- 移除本项目旧的 `~/.hermes/skills/ta` 符号链接，避免 Discord 继续显示 `/ta` 总入口
 - 交互式生成或更新 `local.config.json`
 
 如果项目目录不可写，脚本会自动改用 `~/.local/share/tickflow-assist-hermes/venv`。也可以显式指定虚拟环境目录：
@@ -46,9 +48,14 @@ HERMES_PYTHON=/path/to/hermes/venv/bin/python3 HERMES_PLUGIN_DIR=/path/to/hermes
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -e .
-mkdir -p ~/.hermes/plugins
+mkdir -p ~/.hermes/plugins ~/.hermes/skills
 ln -s "$(pwd)" ~/.hermes/plugins/tickflow-assist
+for skill in skills/ta_*; do
+  ln -sfn "$(pwd)/$skill" "$HOME/.hermes/skills/$(basename "$skill")"
+done
 ```
+
+如果曾安装过旧的 `/ta` 总入口且 `~/.hermes/skills/ta` 是指向本项目的符号链接，可以删除该链接后重启 gateway，避免 Discord 菜单继续显示 `/ta`。
 
 如果创建虚拟环境时报错，Debian/Ubuntu 可先安装：
 
@@ -58,17 +65,17 @@ sudo apt install python3-venv
 
 如果报 `Permission denied: .venv`，说明项目目录或已有 `.venv` 权限不属于当前用户，可直接使用上面的 `TICKFLOW_ASSIST_VENV=...` 方式。
 
-重启 Hermes gateway 后，`/plugins` 应能看到 `tickflow-assist`。Discord / Telegram 的命令菜单会在 gateway 启动时刷新；如果菜单没有立刻变化，执行 `hermes gateway restart` 或在聊天里用 `/restart`。
+重启 Hermes gateway 后，`/plugins` 应能看到 `tickflow-assist`。Discord / Telegram 的命令菜单会在 gateway 启动时刷新；如果菜单没有立刻变化，执行 `hermes gateway restart` 或在聊天里用 `/restart`。Discord 全局命令可能有短暂传播延迟。
 
 如果 `/plugins` 正常，但命令执行时报缺少 `lancedb`、`pandas`、`pyarrow` 等 Python 依赖，请先重新执行 `./setup-tickflow.sh` 并重启 Hermes。脚本会优先使用 Hermes 自己的 Python，并在已有 `.venv` Python 版本不匹配时自动挪走旧环境后重建；仍失败时运行 `/ta_debug`，把其中的 Python、虚拟环境记录、依赖状态和 Python 路径用于排查。
 
 ### Discord / Telegram 命令验证
 
-插件注册统一命令 `/ta`，同时保留旧命令 `/ta_addstock`、`/ta_analyze`、`/ta_watchlist` 等。
+插件提供独立命令 `/ta_addstock`、`/ta_analyze`、`/ta_watchlist` 等，并将同名 skills 安装到 `~/.hermes/skills`，供 Discord 原生命令菜单同步。
 
-- Discord：优先使用 `/ta addstock 002202`、`/ta analyze 002202`、`/ta testalert`。如果细分 `/ta_*` 不出现在 Discord 原生命令菜单中，使用 `/ta`。
-- Telegram：重启 gateway 后 bot 菜单会刷新，可使用 `/ta` 或旧的 `/ta_*` 命令；群聊里如果启用了 `telegram.require_mention`，slash command 仍会作为有效触发。
-- CLI：继续支持 `/ta_*` 与 `/ta`。
+- Discord：直接从 `/` 菜单选择 `/ta_addstock`、`/ta_analyze`、`/ta_testalert` 等。bot 必须用 `applications.commands` scope 邀请；`DISCORD_COMMAND_SYNC_POLICY` 不要设为 `off`；`~/.hermes/config.yaml` 中 `gateway.platforms.discord.extra.slash_commands` 保持默认 `true`。
+- Telegram：重启 gateway 后 bot 菜单会刷新，可使用 `/ta_*` 命令；群聊里如果启用了 `telegram.require_mention`，slash command 仍会作为有效触发。
+- CLI：继续支持 `/ta_*`。
 
 ## 配置
 

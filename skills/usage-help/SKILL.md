@@ -27,11 +27,6 @@ metadata:
 
 常用 Slash Commands：
 
-- `/ta addstock 002261 34.15`
-- `/ta analyze 002261`
-- `/ta watchlist`
-- `/ta monitorstatus`
-- `/ta testalert`
 - `/ta_addstock 002261 34.15`
 - `/ta_analyze 002261`
 - `/ta_watchlist`

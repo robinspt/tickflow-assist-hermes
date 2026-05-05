@@ -432,14 +432,22 @@ class App:
                 media_error = str(exc)
                 media_path = None
         ok, detail = self.send_alert(message, media_path=media_path)
-        if media_path:
-            remove_alert_media(media_path)
         if ok and media_path:
+            remove_alert_media(media_path)
             return "✅ 测试告警发送成功（文本 + PNG）"
         if ok and not self.config.alert_image_enabled:
             return "✅ 测试告警发送成功（文本；PNG 已关闭）"
         if ok and media_error:
             return f"✅ 测试告警发送成功（文本；PNG 生成失败：{media_error}）"
+        if _unknown_tool(detail) and media_path:
+            return (
+                f"{message}\nMEDIA:{media_path}\n\n"
+                "✅ 测试告警已生成（当前命令响应模式，文本 + PNG）。"
+            )
+        if _unknown_tool(detail):
+            return f"{message}\n\n✅ 测试告警已生成（当前命令响应模式，文本）。"
+        if media_path:
+            remove_alert_media(media_path)
         return "✅ 测试告警发送成功（文本）" if ok else f"❌ 测试告警发送失败\n原因: {detail}"
 
     def send_alert(self, message: str, media_path: Path | None = None) -> tuple[bool, str | None]:
@@ -687,3 +695,7 @@ def _extract_eastmoney_stocks(value: Any) -> list[dict[str, Any]]:
 def _table_alias(value: str) -> str:
     aliases = {"自选": "watchlist", "日k": "klines_daily", "日线": "klines_daily", "分钟k": "klines_intraday", "指标": "indicators", "关键价位": "key_levels", "分析日志": "analysis_log", "告警日志": "alert_log"}
     return aliases.get(value.lower(), value)
+
+
+def _unknown_tool(detail: str | None) -> bool:
+    return bool(detail and "Unknown tool: send_message" in detail)
