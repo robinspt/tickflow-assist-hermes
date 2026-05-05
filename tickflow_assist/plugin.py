@@ -105,6 +105,7 @@ def _debug_status() -> str:
                 f"交易日历: {cfg.calendar_file}",
                 f"轮询间隔: {cfg.request_interval}",
                 f"alertDeliveryTarget: {cfg.alert_delivery_target or '未配置'}",
+                f"alertImageEnabled: {'是' if cfg.alert_image_enabled else '否'}",
             ]
         )
     except Exception as exc:

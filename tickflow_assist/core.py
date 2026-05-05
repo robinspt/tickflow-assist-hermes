@@ -413,6 +413,7 @@ class App:
     def test_alert(self) -> str:
         message = f"🧪 TickFlow 测试告警\n时间: {now_text()}\n说明: 这是一条由 Hermes 插件发出的测试消息。"
         media_path = None
+        media_error = None
         if self.config.alert_image_enabled:
             try:
                 media_path = self._write_alert_card(
@@ -426,12 +427,19 @@ class App:
                     points=[("09:30", 12.02), ("10:00", 12.08), ("10:30", 12.12), ("11:30", 12.15), ("13:00", 12.19), ("13:30", 12.23), ("14:00", 12.27), ("14:12", 12.36)],
                     levels={"support": 12.08, "resistance": 12.30, "breakthrough": 12.18, "take_profit": 12.68, "stop_loss": 11.86},
                 )
-            except Exception:
+            except Exception as exc:
+                media_error = str(exc)
                 media_path = None
         ok, detail = self.send_alert(message, media_path=media_path)
         if media_path:
             remove_alert_media(media_path)
-        return "✅ 测试告警发送成功（文本 + PNG）" if ok and media_path else ("✅ 测试告警发送成功（文本）" if ok else f"❌ 测试告警发送失败\n原因: {detail}")
+        if ok and media_path:
+            return "✅ 测试告警发送成功（文本 + PNG）"
+        if ok and not self.config.alert_image_enabled:
+            return "✅ 测试告警发送成功（文本；PNG 已关闭）"
+        if ok and media_error:
+            return f"✅ 测试告警发送成功（文本；PNG 生成失败：{media_error}）"
+        return "✅ 测试告警发送成功（文本）" if ok else f"❌ 测试告警发送失败\n原因: {detail}"
 
     def send_alert(self, message: str, media_path: Path | None = None) -> tuple[bool, str | None]:
         if self.ctx is None:
