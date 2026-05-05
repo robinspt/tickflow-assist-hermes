@@ -6,6 +6,7 @@ from pathlib import Path
 
 from tickflow_assist import schemas, tools
 from tickflow_assist.alert_media import _normalize_points, _scale_trading_x
+from tickflow_assist.clients import _parse_json_rpc
 from tickflow_assist.config import Config, load_config
 from tickflow_assist.core import App
 from tickflow_assist.plugin import register
@@ -376,3 +377,15 @@ def test_alert_points_keep_lunch_break_flat():
 
     assert points == [("11:29", 10.0), ("11:30", 10.1), ("13:00", 10.1), ("13:01", 10.5)]
     assert _scale_trading_x("11:30", 0, 100) == _scale_trading_x("13:00", 0, 100)
+
+
+def test_jin10_json_rpc_parser_accepts_sse_events():
+    raw = 'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}\n\n'
+
+    assert _parse_json_rpc(raw)["result"] == {"ok": True}
+
+
+def test_jin10_json_rpc_parser_skips_non_json_sse_data():
+    raw = ': ping\n\nevent: endpoint\ndata: /mcp\n\nevent: message\ndata: {"jsonrpc":"2.0","id":2,"result":{"items":[]}}\n\n'
+
+    assert _parse_json_rpc(raw)["id"] == 2

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any
@@ -237,10 +238,39 @@ def _compact_to_rows(symbol: str, data: Any, period: str) -> list[dict[str, Any]
 
 def _parse_json_rpc(raw: str) -> dict[str, Any]:
     text = raw.strip()
-    if text.startswith("data:"):
-        lines = [line[5:].strip() for line in text.splitlines() if line.startswith("data:")]
-        text = lines[-1] if lines else text
-    return json.loads(text)
+    if not text:
+        raise RuntimeError("jin10 MCP response is empty")
+    parsed = _try_json_object(text)
+    if parsed is not None:
+        return parsed
+
+    candidates: list[str] = []
+    for event in re.split(r"\n\s*\n", text):
+        data_lines = []
+        for line in event.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("data:"):
+                data_lines.append(stripped[5:].strip())
+        if data_lines:
+            candidate = "\n".join(data_lines).strip()
+            if candidate and candidate != "[DONE]":
+                candidates.append(candidate)
+    for candidate in reversed(candidates):
+        parsed = _try_json_object(candidate)
+        if parsed is not None:
+            return parsed
+    preview = text[:300].replace("\n", "\\n")
+    raise RuntimeError(f"jin10 MCP response is not valid JSON/SSE JSON: {preview}")
+
+
+def _try_json_object(text: str) -> dict[str, Any] | None:
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"jin10 MCP JSON response is not an object: {type(parsed).__name__}")
+    return parsed
 
 
 def _normalize_documents(value: Any) -> list[dict[str, Any]]:
