@@ -478,6 +478,73 @@ def test_start_daily_update_migrates_old_two_job_schedule():
     assert "已忽略旧 Hermes cron 任务记录: old-daily, old-review" in result
 
 
+def test_daily_update_autostarts_by_default_until_user_stops():
+    class MemoryStore:
+        def rows(self, name):
+            return []
+
+    with tempfile.TemporaryDirectory() as tmp:
+        app = App(Config(database_path=tmp, alert_delivery_target="telegram"))
+        app.store = MemoryStore()
+
+        assert app.should_autostart_daily_update() is True
+        app.stop_daily_update()
+        state = app._read_daily_state()
+        assert state["disabledByUser"] is True
+        assert app.should_autostart_daily_update() is False
+
+        try:
+            app.start_daily_update()
+            state = app._read_daily_state()
+            assert state["disabledByUser"] is False
+            assert app.should_autostart_daily_update() is True
+        finally:
+            app.stop_daily_update()
+            if app.daily_thread:
+                app.daily_thread.join(timeout=2)
+
+
+def test_daily_update_once_skips_stale_premarket_and_runs_daily_update():
+    current = [datetime(2026, 5, 6, 15, 26, 0, tzinfo=timezone(timedelta(hours=8)))]
+    previous_now_cn = core_module.now_cn
+    previous_now_text = core_module.now_text
+    previous_today_text = core_module.today_text
+    core_module.now_cn = lambda: current[0]
+    core_module.now_text = lambda: current[0].strftime("%Y-%m-%d %H:%M:%S")
+    core_module.today_text = lambda: current[0].strftime("%Y-%m-%d")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = App(Config(database_path=tmp, calendar_file=str(Path(tmp) / "missing-calendar.txt"), daily_update_notify=False))
+            calls = []
+
+            def fake_pre_market_brief(scheduled=False):
+                calls.append("pre_market")
+                app._record_pre_market_result("success", "pre market", core_module.now_text(), core_module.today_text())
+                return "pre market"
+
+            def fake_update_all(scheduled=False):
+                calls.append("daily_update")
+                app._record_daily_update_result("success", "daily update", core_module.now_text(), core_module.today_text())
+                return "daily update"
+
+            app.pre_market_brief = fake_pre_market_brief
+            app.update_all = fake_update_all
+
+            app._daily_update_once()
+            state = app._read_daily_state()
+
+        assert calls == ["daily_update"]
+        assert state["lastPreMarketAttemptDate"] == "2026-05-06"
+        assert state["lastPreMarketResultType"] == "skipped"
+        assert "不再补跑盘前资讯" in state["lastPreMarketResultSummary"]
+        assert state["lastAttemptDate"] == "2026-05-06"
+        assert state["lastSuccessDate"] == "2026-05-06"
+    finally:
+        core_module.now_cn = previous_now_cn
+        core_module.now_text = previous_now_text
+        core_module.today_text = previous_today_text
+
+
 def test_daily_update_status_marks_stale_running_state():
     with tempfile.TemporaryDirectory() as tmp:
         app = App(Config(database_path=tmp))

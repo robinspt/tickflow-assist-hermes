@@ -202,7 +202,7 @@ Hermes 中注册 `/ta_` 插件 Slash Commands，handler 直接调用工具并返
 
 ## 🧩 架构与目录
 
-后台任务在 Hermes 进程内运行：实时监控、定时日更与金十数据快讯监控分别由 Python daemon thread 执行。定时日更包含 09:20 盘前资讯、15:25 日更和 20:00 收盘复盘。
+后台任务在 Hermes 进程内运行：实时监控、定时日更与金十数据快讯监控分别由 Python daemon thread 执行。定时日更默认随插件加载启动，可用 `/ta_stopdailyupdate` 手动停用；它包含 09:20 盘前资讯、15:25 日更和 20:00 收盘复盘。
 
 ```text
 tickflow-assist-hermes/

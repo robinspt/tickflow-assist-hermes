@@ -49,6 +49,7 @@ PRE_MARKET_BRIEF_SYSTEM = """你是一位A股开盘前资讯简报编辑。基�
 
 PRE_MARKET_BRIEF_KEYWORD = "金十数据整理"
 PRE_MARKET_BRIEF_READY_TIME = "09:20"
+PRE_MARKET_BRIEF_EXPIRE_TIME = "09:30"
 DAILY_UPDATE_READY_TIME = "15:25"
 POST_CLOSE_REVIEW_READY_TIME = "20:00"
 DAILY_SCHEDULE_VERSION = 2
@@ -117,6 +118,12 @@ DAILY_DEFAULT_STATE = {
     "reviewConsecutiveFailures": 0,
     "lastError": None,
     "lastErrorAt": None,
+    "disabledByUser": False,
+    "lastNotificationAttemptAt": None,
+    "lastNotificationSentAt": None,
+    "lastNotificationTarget": None,
+    "lastNotificationError": None,
+    "lastNotificationErrorAt": None,
 }
 
 
@@ -580,13 +587,13 @@ class App:
     def start_daily_update(self) -> str:
         state = self._read_daily_state()
         old_job_ids = list(state.get("jobIds") or [])
-        state.update({"running": True, "scheduleVersion": DAILY_SCHEDULE_VERSION, "startedAt": state.get("startedAt") or now_text(), "lastStoppedAt": None, "runtimeHost": "hermes_thread", "runtimeObservedAt": now_text(), "jobIds": [], "lastError": None, "lastErrorAt": None})
+        state.update({"running": True, "scheduleVersion": DAILY_SCHEDULE_VERSION, "startedAt": state.get("startedAt") or now_text(), "lastStoppedAt": None, "runtimeHost": "hermes_thread", "runtimeObservedAt": now_text(), "jobIds": [], "lastError": None, "lastErrorAt": None, "disabledByUser": False})
         self._write_daily_state(state)
         if not self.daily_thread or not self.daily_thread.is_alive():
             self.daily_stop.clear()
             self.daily_thread = threading.Thread(target=self._daily_update_loop, daemon=True)
             self.daily_thread.start()
-        lines = ["✅ TickFlow 定时任务已启动", "运行方式: hermes_thread", f"盘前资讯: 交易日 {PRE_MARKET_BRIEF_READY_TIME}", f"日更: 交易日 {DAILY_UPDATE_READY_TIME}", f"复盘: 交易日 {POST_CLOSE_REVIEW_READY_TIME}", f"轮询间隔: {DAILY_UPDATE_LOOP_INTERVAL_SECONDS} 秒"]
+        lines = ["✅ TickFlow 定时任务已启动", "运行方式: hermes_thread", f"盘前资讯: 交易日 {PRE_MARKET_BRIEF_READY_TIME}（窗口至 {PRE_MARKET_BRIEF_EXPIRE_TIME}）", f"日更: 交易日 {DAILY_UPDATE_READY_TIME}", f"复盘: 交易日 {POST_CLOSE_REVIEW_READY_TIME}", f"轮询间隔: {DAILY_UPDATE_LOOP_INTERVAL_SECONDS} 秒"]
         if old_job_ids:
             lines.append(f"已忽略旧 Hermes cron 任务记录: {', '.join(str(item) for item in old_job_ids)}")
         return "\n".join(lines)
@@ -594,10 +601,14 @@ class App:
     def stop_daily_update(self) -> str:
         self.daily_stop.set()
         state = self._read_daily_state()
-        state.update({"running": False, "lastStoppedAt": now_text()})
+        state.update({"running": False, "lastStoppedAt": now_text(), "disabledByUser": True})
         state.pop("jobIds", None)
         self._write_daily_state(state)
         return "🛑 TickFlow 定时任务已停止"
+
+    def should_autostart_daily_update(self) -> bool:
+        state = self._read_daily_state()
+        return bool(state.get("running")) or not bool(state.get("disabledByUser"))
 
     def daily_update_status(self) -> str:
         state = self._read_daily_state()
@@ -608,6 +619,8 @@ class App:
             status = "✅ 运行中"
         elif state.get("running"):
             status = "⚠️ 已启用但后台未正常心跳"
+        elif state.get("disabledByUser"):
+            status = "⭕ 已手动停用"
         else:
             status = "⭕ 未启动"
         lines = [
@@ -615,7 +628,7 @@ class App:
             f"状态: {status}",
             "运行方式: hermes_thread",
             "配置来源: Hermes plugin/env/local.config.json",
-            f"调度: 盘前资讯 {PRE_MARKET_BRIEF_READY_TIME} | 日更 {DAILY_UPDATE_READY_TIME} | 复盘 {POST_CLOSE_REVIEW_READY_TIME} | 交易日周一至周五",
+            f"调度: 盘前资讯 {PRE_MARKET_BRIEF_READY_TIME}（窗口至 {PRE_MARKET_BRIEF_EXPIRE_TIME}） | 日更 {DAILY_UPDATE_READY_TIME} | 复盘 {POST_CLOSE_REVIEW_READY_TIME} | 交易日周一至周五",
             f"轮询间隔: {DAILY_UPDATE_LOOP_INTERVAL_SECONDS} 秒",
             f"后台线程: {'存活' if thread_alive else '未运行'}",
             f"最近心跳: {_format_heartbeat(state.get('lastHeartbeatAt'), DAILY_UPDATE_LOOP_INTERVAL_SECONDS, DAILY_UPDATE_STALE_GRACE_SECONDS) or '暂无'}",
@@ -651,6 +664,10 @@ class App:
                 lines.append(f"{title}最近摘要: {summary}")
         if state.get("lastError"):
             lines.append(f"最近调度异常: {state.get('lastErrorAt') or '未知时间'} | {state.get('lastError')}")
+        if state.get("lastNotificationSentAt"):
+            lines.append(f"最近投递成功: {state.get('lastNotificationSentAt')} | {state.get('lastNotificationTarget') or '-'}")
+        if state.get("lastNotificationError"):
+            lines.append(f"最近投递异常: {state.get('lastNotificationErrorAt') or '未知时间'} | {state.get('lastNotificationError')}")
         return "\n".join(lines)
 
     def flash_monitor_status(self) -> str:
@@ -1106,8 +1123,14 @@ class App:
         state = self._read_daily_state()
         today = today_text()
         hhmm = now_cn().strftime("%H:%M")
-        if hhmm >= PRE_MARKET_BRIEF_READY_TIME and _should_run_scheduled_task(state, "lastPreMarketAttemptDate", "lastPreMarketSuccessDate", today):
+        if (
+            PRE_MARKET_BRIEF_READY_TIME <= hhmm <= PRE_MARKET_BRIEF_EXPIRE_TIME
+            and _should_run_scheduled_task(state, "lastPreMarketAttemptDate", "lastPreMarketSuccessDate", today)
+        ):
             self._run_daily_scheduled_action(lambda: self.pre_market_brief(scheduled=True))
+        elif hhmm > PRE_MARKET_BRIEF_EXPIRE_TIME and _should_run_scheduled_task(state, "lastPreMarketAttemptDate", "lastPreMarketSuccessDate", today):
+            message = f"已超过盘前资讯窗口 {PRE_MARKET_BRIEF_READY_TIME}-{PRE_MARKET_BRIEF_EXPIRE_TIME}，今日不再补跑盘前资讯。"
+            self._record_pre_market_result("skipped", message, now_text(), today)
         state = self._read_daily_state()
         if hhmm >= DAILY_UPDATE_READY_TIME and _should_run_scheduled_task(state, "lastAttemptDate", "lastSuccessDate", today):
             self._run_daily_scheduled_action(lambda: self.update_all(scheduled=True))
@@ -1122,7 +1145,18 @@ class App:
     def _run_daily_scheduled_action(self, fn) -> None:
         message = fn()
         if self.config.daily_update_notify and not str(message).startswith("[SILENT]"):
-            self.send_alert(message)
+            attempted_at = now_text()
+            ok, detail = self.send_alert(message)
+            state = self._read_daily_state()
+            state.update({
+                "lastNotificationAttemptAt": attempted_at,
+                "lastNotificationTarget": self.config.alert_delivery_target,
+            })
+            if ok:
+                state.update({"lastNotificationSentAt": attempted_at, "lastNotificationError": None, "lastNotificationErrorAt": None})
+            else:
+                state.update({"lastNotificationError": detail or "send_alert failed", "lastNotificationErrorAt": attempted_at})
+            self._write_daily_state(state)
 
     def _write_alert_card(
         self,

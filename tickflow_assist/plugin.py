@@ -71,8 +71,7 @@ def register(ctx):
     except Exception:
         pass
     try:
-        daily_state = app._read_daily_state()
-        if daily_state.get("running"):
+        if app.should_autostart_daily_update():
             app.start_daily_update()
     except Exception:
         pass
