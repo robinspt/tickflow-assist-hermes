@@ -241,7 +241,7 @@ tickflow-assist-hermes/
 
 ## 🖼 效果预览
 
-`/ta_testalert` 与 `test_alert` 会同时验证文本和 PNG 告警卡链路。下图为当前测试告警样式示例：
+`/ta_testalert` 会同时验证文本和 PNG 告警卡链路。下图为当前测试告警样式示例：
 
 ![TickFlow Assist 测试告警 PNG 示例](docs/images/test-alert-demo.png)
 
