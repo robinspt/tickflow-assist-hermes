@@ -10,7 +10,7 @@
 - Python 负责插件注册、工具实现、TickFlow/MX/Jin10/LLM 调用与实时监控循环
 - LanceDB 保持原表结构，不迁移为其他数据库
 - 技术指标由 Python/pandas/numpy 计算
-- 盘前资讯、定时日更与收盘复盘使用 Hermes `cronjob`
+- 盘前资讯、定时日更与收盘复盘使用 Hermes script-only `cronjob`，不经过 LLM
 - 告警消息使用 Hermes `send_message`，PNG 图片通过 `MEDIA:/path/to/file` 附加
 
 ## 安装

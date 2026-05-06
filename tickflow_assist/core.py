@@ -52,6 +52,7 @@ PRE_MARKET_BRIEF_READY_TIME = "09:20"
 DAILY_UPDATE_READY_TIME = "15:25"
 POST_CLOSE_REVIEW_READY_TIME = "20:00"
 DAILY_SCHEDULE_VERSION = 2
+CRON_SCRIPT_PREFIX = "tickflow-assist"
 MONITOR_STALE_GRACE_SECONDS = 90
 DAILY_UPDATE_STALE_GRACE_SECONDS = 20 * 60
 UNIVERSE_CACHE_REFRESH_SECONDS = 24 * 60 * 60
@@ -592,36 +593,25 @@ class App:
             self._create_cron_job(
                 name="TickFlow Assist 盘前资讯",
                 schedule="20 9 * * 1-5",
-                prompt=(
-                    "执行 TickFlow Assist 盘前资讯。调用 tickflow-assist 工具 pre_market_brief，参数 scheduled=true。"
-                    "最终只输出该工具返回 JSON 的 text 字段，不要改写，不要调用 send_message；Hermes cron 会自动投递。"
-                    "如果 text 以 [SILENT] 开头，原样输出。"
-                ),
+                command="pre_market_brief",
             ),
             self._create_cron_job(
                 name="TickFlow Assist 日更",
                 schedule="25 15 * * 1-5",
-                prompt=(
-                    "执行 TickFlow Assist A股日更。调用 tickflow-assist 工具 update_all，参数 scheduled=true，更新全部自选股行情、K线和指标。"
-                    "最终只输出该工具返回 JSON 的 text 字段，不要改写，不要调用 send_message；Hermes cron 会自动投递。"
-                    "如果 text 以 [SILENT] 开头，原样输出。"
-                ),
+                command="update_all",
             ),
             self._create_cron_job(
                 name="TickFlow Assist 收盘复盘",
                 schedule="0 20 * * 1-5",
-                prompt=(
-                    "执行 TickFlow Assist 收盘复盘。调用 tickflow-assist 工具 post_close_review，参数 scheduled=true。"
-                    "最终只输出该工具返回 JSON 的 text 字段，不要改写，不要调用 send_message；Hermes cron 会自动投递。"
-                    "如果 text 以 [SILENT] 开头，原样输出。"
-                ),
+                command="post_close_review",
             ),
         ]
-        new_job_ids = [job_id for job_id in jobs if job_id]
+        new_job_ids = [str(job["jobId"]) for job in jobs if job.get("jobId")]
         if len(new_job_ids) < 3:
-            state.update({"running": False, "lastErrorAt": now_text(), "lastError": "Hermes cronjob did not return job_id"})
+            details = "; ".join(f"{job.get('name')}: {job.get('detail')}" for job in jobs if not job.get("jobId"))
+            state.update({"running": False, "scheduleVersion": DAILY_SCHEDULE_VERSION, "runtimeObservedAt": now_text(), "jobIds": new_job_ids, "lastErrorAt": now_text(), "lastError": _truncate(f"Hermes cronjob did not return job_id: {details}", 1200)})
             self._write_daily_state(state)
-            return "❌ Hermes cron 任务创建失败，请确认 cronjob 工具在当前 Hermes 会话可用。"
+            return "❌ Hermes cron 任务创建失败，请确认 cronjob 工具在当前 Hermes 会话可用。\n" + _truncate(details, 800)
         state.update({"running": True, "scheduleVersion": DAILY_SCHEDULE_VERSION, "startedAt": state.get("startedAt") or now_text(), "lastStoppedAt": None, "runtimeHost": "hermes_cron", "runtimeObservedAt": now_text(), "jobIds": new_job_ids, "lastError": None, "lastErrorAt": None})
         self._write_daily_state(state)
         lines = ["✅ TickFlow 定时任务已交给 Hermes cron", f"盘前资讯: 交易日 {PRE_MARKET_BRIEF_READY_TIME}", f"日更: 交易日 {DAILY_UPDATE_READY_TIME}", f"复盘: 交易日 {POST_CLOSE_REVIEW_READY_TIME}", f"任务: {', '.join(new_job_ids)}"]
@@ -971,18 +961,72 @@ class App:
         except Exception as exc:
             return False, str(exc)
 
-    def _create_cron_job(self, name: str, schedule: str, prompt: str) -> str | None:
-        payload: dict[str, Any] = {"action": "create", "name": name, "schedule": schedule, "prompt": prompt, "skills": ["stock-analysis"]}
+    def _create_cron_job(self, name: str, schedule: str, command: str) -> dict[str, Any]:
+        try:
+            script_name = self._write_cron_script(command)
+        except Exception as exc:
+            return {"name": name, "jobId": None, "detail": f"script write failed: {exc}"}
+        payload: dict[str, Any] = {"action": "create", "name": name, "schedule": schedule, "script": script_name, "no_agent": True}
         if not self.config.daily_update_notify:
             payload["deliver"] = "local"
         elif self.config.alert_delivery_target:
             payload["deliver"] = self.config.alert_delivery_target
-        result = self.ctx.dispatch_tool("cronjob", payload)
         try:
+            result = self.ctx.dispatch_tool("cronjob", payload)
             parsed = json.loads(result) if isinstance(result, str) else result
-            return parsed.get("job_id") if isinstance(parsed, dict) else None
-        except Exception:
-            return None
+            job_id = _extract_cron_job_id(parsed)
+            return {"name": name, "jobId": job_id, "detail": _compact_json(parsed), "payload": payload}
+        except Exception as exc:
+            return {"name": name, "jobId": None, "detail": f"{type(exc).__name__}: {exc}", "payload": payload}
+
+    def _write_cron_script(self, command: str) -> str:
+        if command not in {"pre_market_brief", "update_all", "post_close_review"}:
+            raise ValueError(f"unsupported cron command: {command}")
+        scripts_dir = Path.home() / ".hermes" / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        script_name = f"{CRON_SCRIPT_PREFIX}-{command.replace('_', '-')}.py"
+        script_path = scripts_dir / script_name
+        root = str(self.plugin_root)
+        content = f"""from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path({root!r})
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+try:
+    from hermes_bootstrap import add_local_venv_site_packages
+    add_local_venv_site_packages(ROOT)
+except Exception:
+    pass
+
+from tickflow_assist import tools
+
+HANDLERS = {{
+    "pre_market_brief": tools.pre_market_brief,
+    "update_all": tools.update_all,
+    "post_close_review": tools.post_close_review,
+}}
+
+payload = HANDLERS[{command!r}]({{"scheduled": True}})
+try:
+    parsed = json.loads(payload) if isinstance(payload, str) else payload
+except Exception:
+    parsed = {{"text": str(payload)}}
+if isinstance(parsed, dict):
+    text = parsed.get("text") or parsed.get("error") or ""
+else:
+    text = str(parsed)
+if text:
+    print(str(text).rstrip())
+"""
+        existing = script_path.read_text(encoding="utf-8") if script_path.exists() else None
+        if existing != content:
+            script_path.write_text(content, encoding="utf-8")
+        return script_name
 
     def _monitor_loop(self) -> None:
         while not self.monitor_stop.is_set():
@@ -1743,6 +1787,47 @@ def _format_heartbeat(value: Any, interval_seconds: int, minimum_seconds: int) -
 
 def _format_task_result(value: Any) -> str:
     return {"success": "成功", "failed": "失败", "skipped": "跳过"}.get(str(value or ""), "暂无")
+
+
+def _extract_cron_job_id(value: Any) -> str | None:
+    if isinstance(value, dict):
+        for key in ["job_id", "jobId", "id"]:
+            text = str(value.get(key) or "").strip()
+            if text:
+                return text
+        for key in ["job", "data", "result"]:
+            nested = _extract_cron_job_id(value.get(key))
+            if nested:
+                return nested
+        jobs = value.get("jobs")
+        if isinstance(jobs, list):
+            for item in jobs:
+                nested = _extract_cron_job_id(item)
+                if nested:
+                    return nested
+        for nested_value in value.values():
+            if isinstance(nested_value, (dict, list, str)):
+                nested = _extract_cron_job_id(nested_value)
+                if nested:
+                    return nested
+    if isinstance(value, list):
+        for item in value:
+            nested = _extract_cron_job_id(item)
+            if nested:
+                return nested
+    if isinstance(value, str):
+        match = re.search(r"(?:job[_\s-]?id|id)\s*[:=]\s*([A-Za-z0-9_-]{6,})", value, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _compact_json(value: Any, limit: int = 500) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:
+        text = str(value)
+    return _truncate(text, limit)
 
 
 def _summarize_task_message(value: str, limit: int = 220) -> str:

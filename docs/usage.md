@@ -81,7 +81,7 @@ Jin10 快讯监控在插件加载且 `jin10ApiToken` 已配置时自动启动 da
 - 日更：交易日 15:25 调用 `update_all`
 - 复盘：交易日 20:00 调用 `post_close_review`
 
-这些 cron 会调用插件工具本身，由工具写回 `daily-update-state.json`。因此 `/ta_dailyupdatestatus` 会分别显示盘前资讯、日更、复盘的最近尝试、最近成功、今日是否完成和失败摘要。状态文件仍放在 `databasePath` 下，便于 `monitor_status` 和 `daily_update_status` 查看。
+这些 cron 使用 Hermes script-only no-agent 模式，会在 `~/.hermes/scripts/` 写入三个小脚本并直接调用插件工具，不经过 LLM、不消耗 token。工具会写回 `daily-update-state.json`，因此 `/ta_dailyupdatestatus` 会分别显示盘前资讯、日更、复盘的最近尝试、最近成功、今日是否完成和失败摘要。状态文件仍放在 `databasePath` 下，便于 `monitor_status` 和 `daily_update_status` 查看。
 
 Hermes cron 由 gateway 调度器触发，任务会在新的 agent session 中运行并注入 `stock-analysis` skill。若已创建任务但到点没有执行，先用 `/cron list`、`/cron status` 或 `hermes cron status` 检查 gateway 与任务状态。
 

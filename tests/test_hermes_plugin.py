@@ -8,7 +8,7 @@ from pathlib import Path
 from tickflow_assist import schemas, tools
 from tickflow_assist.alert_media import _normalize_points, _scale_trading_x
 from tickflow_assist.clients import _extract_jin10_structured_result, _parse_json_rpc, _parse_json_rpc_batch, _repair_mojibake
-from tickflow_assist.core import _flash_has_more, _flash_next_cursor, _flash_page_items
+from tickflow_assist.core import _extract_cron_job_id, _flash_has_more, _flash_next_cursor, _flash_page_items
 from tickflow_assist.config import Config, load_config
 from tickflow_assist.core import App
 from tickflow_assist.plugin import register
@@ -276,14 +276,27 @@ def test_start_daily_update_uses_hermes_cron_jobs():
         app = App(Config(database_path=tmp, alert_delivery_target="telegram"))
         ctx = DispatchCtx()
         app.set_context(ctx)
-        result = app.start_daily_update()
+        previous_home = os.environ.get("HOME")
+        os.environ["HOME"] = tmp
+        try:
+            result = app.start_daily_update()
+        finally:
+            if previous_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = previous_home
 
     assert "Hermes cron" in result
     cron_calls = [args for name, args in ctx.calls if name == "cronjob"]
     assert [call["action"] for call in cron_calls] == ["create", "create", "create"]
     assert [call["schedule"] for call in cron_calls] == ["20 9 * * 1-5", "25 15 * * 1-5", "0 20 * * 1-5"]
     assert all(call["deliver"] == "telegram" for call in cron_calls)
-    assert all(call["skills"] == ["stock-analysis"] for call in cron_calls)
+    assert all(call["no_agent"] is True for call in cron_calls)
+    assert [call["script"] for call in cron_calls] == [
+        "tickflow-assist-pre-market-brief.py",
+        "tickflow-assist-update-all.py",
+        "tickflow-assist-post-close-review.py",
+    ]
 
 
 def test_start_daily_update_migrates_old_two_job_schedule():
@@ -293,7 +306,15 @@ def test_start_daily_update_migrates_old_two_job_schedule():
         app.set_context(ctx)
         app._write_daily_state({"running": True, "scheduleVersion": 1, "jobIds": ["old-daily", "old-review"]})
 
-        result = app.start_daily_update()
+        previous_home = os.environ.get("HOME")
+        os.environ["HOME"] = tmp
+        try:
+            result = app.start_daily_update()
+        finally:
+            if previous_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = previous_home
         state = app._read_daily_state()
 
     cron_calls = [args for name, args in ctx.calls if name == "cronjob"]
@@ -301,6 +322,14 @@ def test_start_daily_update_migrates_old_two_job_schedule():
     assert state["scheduleVersion"] == 2
     assert len(state["jobIds"]) == 3
     assert "已移除旧任务" in result
+
+
+def test_extract_cron_job_id_accepts_common_response_shapes():
+    assert _extract_cron_job_id({"job_id": "abc123"}) == "abc123"
+    assert _extract_cron_job_id({"job": {"id": "def456"}}) == "def456"
+    assert _extract_cron_job_id({"data": {"jobId": "ghi789"}}) == "ghi789"
+    assert _extract_cron_job_id({"success": True, "message": "Set up. Job ID: mno345"}) == "mno345"
+    assert _extract_cron_job_id("Created job id: jkl012") == "jkl012"
 
 
 def test_monitor_status_marks_stale_running_state():
