@@ -545,7 +545,51 @@ def test_daily_update_once_skips_stale_premarket_and_runs_daily_update():
         core_module.today_text = previous_today_text
 
 
-def test_daily_update_status_marks_stale_running_state():
+def test_daily_update_review_retries_after_waiting_for_daily_update():
+    current = [datetime(2026, 5, 6, 20, 1, 0, tzinfo=timezone(timedelta(hours=8)))]
+    previous_now_cn = core_module.now_cn
+    previous_now_text = core_module.now_text
+    previous_today_text = core_module.today_text
+    core_module.now_cn = lambda: current[0]
+    core_module.now_text = lambda: current[0].strftime("%Y-%m-%d %H:%M:%S")
+    core_module.today_text = lambda: current[0].strftime("%Y-%m-%d")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = App(Config(database_path=tmp, calendar_file=str(Path(tmp) / "missing-calendar.txt"), daily_update_notify=False))
+            review_calls = []
+
+            def fake_post_close_review(scheduled=False):
+                review_calls.append("review")
+                app._record_review_result("success", "review", core_module.now_text(), core_module.today_text())
+                return "review"
+
+            app.post_close_review = fake_post_close_review
+            app._write_daily_state({
+                "running": True,
+                "lastPreMarketAttemptDate": "2026-05-06",
+                "lastAttemptDate": "2026-05-06",
+                "lastResultType": "failed",
+            })
+
+            app._daily_update_once()
+            waiting_state = app._read_daily_state()
+            current[0] = datetime(2026, 5, 6, 20, 2, 0, tzinfo=timezone(timedelta(hours=8)))
+            waiting_state.update({"lastSuccessAt": "2026-05-06 21:54:00", "lastSuccessDate": "2026-05-06"})
+            app._write_daily_state(waiting_state)
+            app._daily_update_once()
+            state = app._read_daily_state()
+
+        assert review_calls == ["review"]
+        assert waiting_state["lastReviewResultType"] == "waiting_daily_update"
+        assert state["lastReviewResultType"] == "success"
+        assert state["lastReviewSuccessDate"] == "2026-05-06"
+    finally:
+        core_module.now_cn = previous_now_cn
+        core_module.now_text = previous_now_text
+        core_module.today_text = previous_today_text
+
+
+def test_daily_update_status_recovers_stale_running_state():
     with tempfile.TemporaryDirectory() as tmp:
         app = App(Config(database_path=tmp))
         app._write_daily_state(
@@ -557,11 +601,17 @@ def test_daily_update_status_marks_stale_running_state():
         )
 
         text = app.daily_update_status()
+        state = app._read_daily_state()
 
-    assert "状态: ⚠️ 已启用但后台未正常心跳" in text
+        app.stop_daily_update()
+        if app.daily_thread:
+            app.daily_thread.join(timeout=2)
+
+    assert "状态: ✅ 运行中" in text
     assert "运行方式: hermes_thread" in text
-    assert "后台线程: 未运行" in text
-    assert "已超时" in text
+    assert "后台线程: 存活" in text
+    assert "自动恢复: 已重新启动定时日更线程" in text
+    assert state["running"] is True
 
 
 def test_monitor_status_marks_stale_running_state():

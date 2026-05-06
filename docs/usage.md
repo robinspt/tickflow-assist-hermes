@@ -81,7 +81,7 @@ Jin10 快讯监控在插件加载且 `jin10ApiToken` 已配置时自动启动 da
 - 日更：交易日 15:25 调用 `update_all`
 - 复盘：交易日 20:00 调用 `post_close_review`
 
-后台线程会直接调用插件工具，不经过 LLM、不消耗 token；如果 `dailyUpdateNotify=true`，会通过 `alertDeliveryTarget` 投递执行结果。工具会写回 `daily-update-state.json`，因此 `/ta_dailyupdatestatus` 会分别显示盘前资讯、日更、复盘的最近尝试、最近成功、今日是否完成、失败摘要和最近投递异常。状态文件仍放在 `databasePath` 下，便于 `monitor_status` 和 `daily_update_status` 查看。
+后台线程会直接调用插件工具，不经过 LLM、不消耗 token；如果 `dailyUpdateNotify=true`，会通过 `alertDeliveryTarget` 投递执行结果。工具会写回 `daily-update-state.json`，因此 `/ta_dailyupdatestatus` 会分别显示盘前资讯、日更、复盘的最近尝试、最近成功、今日是否完成、失败摘要和最近投递异常。如果线程意外丢失，`/ta_dailyupdatestatus` 和 `/ta_*` 命令会尝试自动恢复未手动停用的调度线程；若 20:00 复盘曾因日更未完成而等待，后续日更成功后会继续补跑复盘。状态文件仍放在 `databasePath` 下，便于 `monitor_status` 和 `daily_update_status` 查看。
 
 告警投递使用 `alertDeliveryTarget`，格式参考 Hermes delivery targets，例如 `telegram`、`telegram:-1001234567890`、`telegram:-1001234567890:17585`、`discord:999888777`。文本消息通过 Hermes `send_message` 发送；PNG 告警卡通过消息中的 `MEDIA:/path/to/file` 附加。
 

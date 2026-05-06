@@ -587,7 +587,8 @@ class App:
     def start_daily_update(self) -> str:
         state = self._read_daily_state()
         old_job_ids = list(state.get("jobIds") or [])
-        state.update({"running": True, "scheduleVersion": DAILY_SCHEDULE_VERSION, "startedAt": state.get("startedAt") or now_text(), "lastStoppedAt": None, "runtimeHost": "hermes_thread", "runtimeObservedAt": now_text(), "jobIds": [], "lastError": None, "lastErrorAt": None, "disabledByUser": False})
+        started_at = now_text()
+        state.update({"running": True, "scheduleVersion": DAILY_SCHEDULE_VERSION, "startedAt": state.get("startedAt") or started_at, "lastStoppedAt": None, "runtimeHost": "hermes_thread", "runtimeObservedAt": started_at, "lastHeartbeatAt": started_at, "jobIds": [], "lastError": None, "lastErrorAt": None, "disabledByUser": False})
         self._write_daily_state(state)
         if not self.daily_thread or not self.daily_thread.is_alive():
             self.daily_stop.clear()
@@ -610,7 +611,16 @@ class App:
         state = self._read_daily_state()
         return bool(state.get("running")) or not bool(state.get("disabledByUser"))
 
+    def ensure_daily_update_running(self) -> bool:
+        if not self.should_autostart_daily_update():
+            return False
+        if self.daily_thread and self.daily_thread.is_alive():
+            return False
+        self.start_daily_update()
+        return True
+
     def daily_update_status(self) -> str:
+        auto_recovered = self.ensure_daily_update_running()
         state = self._read_daily_state()
         today = today_text()
         thread_alive = bool(self.daily_thread and self.daily_thread.is_alive())
@@ -632,6 +642,10 @@ class App:
             f"轮询间隔: {DAILY_UPDATE_LOOP_INTERVAL_SECONDS} 秒",
             f"后台线程: {'存活' if thread_alive else '未运行'}",
             f"最近心跳: {_format_heartbeat(state.get('lastHeartbeatAt'), DAILY_UPDATE_LOOP_INTERVAL_SECONDS, DAILY_UPDATE_STALE_GRACE_SECONDS) or '暂无'}",
+        ]
+        if auto_recovered:
+            lines.append("自动恢复: 已重新启动定时日更线程")
+        lines.extend([
             "",
             "盘前资讯:",
             f"• 今日已推送: {'是' if state.get('lastPreMarketSuccessDate') == today else '否'}",
@@ -650,7 +664,7 @@ class App:
             f"• 最近尝试: {state.get('lastReviewAttemptAt') or '暂无'}",
             f"• 最近成功: {state.get('lastReviewSuccessAt') or '暂无'}",
             f"• 最近结果: {_format_task_result(state.get('lastReviewResultType'))}",
-        ]
+        ])
         for count_key, summary_key, title in [
             ("preMarketConsecutiveFailures", "lastPreMarketResultSummary", "盘前资讯"),
             ("consecutiveFailures", "lastResultSummary", "日更执行"),
@@ -1135,10 +1149,10 @@ class App:
         if hhmm >= DAILY_UPDATE_READY_TIME and _should_run_scheduled_task(state, "lastAttemptDate", "lastSuccessDate", today):
             self._run_daily_scheduled_action(lambda: self.update_all(scheduled=True))
         state = self._read_daily_state()
-        if hhmm >= POST_CLOSE_REVIEW_READY_TIME and _should_run_scheduled_task(state, "lastReviewAttemptDate", "lastReviewSuccessDate", today):
+        if hhmm >= POST_CLOSE_REVIEW_READY_TIME and _should_run_review_task(state, today):
             if state.get("lastSuccessDate") != today:
                 message = f"今日日更尚未在 {DAILY_UPDATE_READY_TIME} 后成功完成，暂不执行收盘复盘"
-                self._record_review_result("skipped", message, now_text(), today)
+                self._record_review_result("waiting_daily_update", message, now_text(), today)
             else:
                 self._run_daily_scheduled_action(lambda: self.post_close_review(scheduled=True))
 
@@ -1856,11 +1870,19 @@ def _format_heartbeat(value: Any, interval_seconds: int, minimum_seconds: int) -
 
 
 def _format_task_result(value: Any) -> str:
-    return {"success": "成功", "failed": "失败", "skipped": "跳过"}.get(str(value or ""), "暂无")
+    return {"success": "成功", "failed": "失败", "skipped": "跳过", "waiting_daily_update": "等待日更"}.get(str(value or ""), "暂无")
 
 
 def _should_run_scheduled_task(state: dict[str, Any], attempt_key: str, success_key: str, today: str) -> bool:
     return state.get(attempt_key) != today and state.get(success_key) != today
+
+
+def _should_run_review_task(state: dict[str, Any], today: str) -> bool:
+    if state.get("lastReviewSuccessDate") == today:
+        return False
+    if state.get("lastReviewResultType") == "waiting_daily_update":
+        return True
+    return state.get("lastReviewAttemptDate") != today
 
 
 def _monitor_session_key() -> str:

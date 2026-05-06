@@ -71,8 +71,7 @@ def register(ctx):
     except Exception:
         pass
     try:
-        if app.should_autostart_daily_update():
-            app.start_daily_update()
+        app.ensure_daily_update_running()
     except Exception:
         pass
     try:
@@ -125,7 +124,13 @@ def _resolve_ta_command(raw_args: str) -> tuple[str, str] | None:
 
 def _run_command_text(command: str, args: str) -> str:
     tool_name, parser = COMMAND_MAP[command]
-    return _json_text_field(tools.HANDLERS[tool_name](parser(args or "")))
+    result = _json_text_field(tools.HANDLERS[tool_name](parser(args or "")))
+    if command != "ta_stopdailyupdate":
+        try:
+            tools.get_app().ensure_daily_update_running()
+        except Exception:
+            pass
+    return result
 
 
 def _json_text_field(payload: str) -> str:
