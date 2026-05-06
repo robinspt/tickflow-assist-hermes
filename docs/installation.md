@@ -61,6 +61,8 @@ sudo apt install python3-venv
 
 如果报 `Permission denied: .venv`，说明项目目录或已有 `.venv` 权限不属于当前用户，可直接使用上面的 `TICKFLOW_ASSIST_VENV=...` 方式。
 
+脚本完成后无需手动配置，直接执行下方启用插件步骤。如果没有运行一键安装脚本，请先完成“手动配置”章节，再启用插件。
+
 Hermes 插件默认是 opt-in。源码目录链接到 `~/.hermes/plugins/tickflow-assist` 后，还需要显式启用插件：
 
 ```bash
@@ -91,9 +93,9 @@ hermes gateway restart
 - 如果内置命令存在但 `/ta_*` 不存在，说明当前 gateway 没有加载插件命令；检查插件是否启用、gateway 是否重启，以及消息端 gateway 是否运行在同一个 `~/.hermes`。
 - 如必须要 Discord 菜单可选择且 Hermes 版本不支持插件命令同步，只能使用 skill 入口，但会有额外加载和 token 开销。
 
-## 配置
+## 手动配置
 
-推荐使用 `setup-tickflow.sh` 生成 `local.config.json`，插件会读取其中的 `plugin` 字段。也可以写入 Hermes 的 `.env`：
+一键安装脚本会交互式生成或更新 `local.config.json`，脚本安装用户无需手动配置。本节只适用于手动源码安装、非交互部署，或后续直接编辑配置文件的场景。插件会读取 `local.config.json` 的 `plugin` 字段，也可以写入 Hermes 的 `.env`：
 
 ```bash
 TICKFLOW_ASSIST_TICKFLOW_API_KEY=your-tickflow-key
