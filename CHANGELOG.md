@@ -10,7 +10,7 @@
 - 插件注册阶段改为 lazy-load 业务依赖，避免 `/plugins` 因 `pandas` 等工具运行时依赖未进入当前解释器路径而直接加载失败。
 - 告警配置改为 Hermes delivery target 语义，使用 `alertDeliveryTarget` / `TICKFLOW_ASSIST_ALERT_DELIVERY_TARGET`。
 - 文本告警通过 Hermes `send_message` 发送，PNG 告警卡通过 `MEDIA:/path/to/file` 附加。
-- 定时日更改为创建 Hermes `cronjob` 任务：15:25 日更、20:00 收盘复盘。
+- 盘前资讯、定时日更与收盘复盘改为 Hermes 进程内后台线程：09:20 盘前资讯、15:25 日更、20:00 收盘复盘，不依赖 `cronjob` 工具。
 - 保留原有 `/ta_` Slash Commands，包括 `/ta_backtest`、`/ta_refreshnames`、`/ta_refreshprofiles` 与 `/ta_debug`。
 - 数据库继续使用 LanceDB，并保留原表名与字段：
   - `watchlist`

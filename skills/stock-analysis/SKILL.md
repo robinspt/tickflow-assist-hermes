@@ -44,7 +44,7 @@ metadata:
 - 股票代码按用户原始输入提取，例如 `002261`。
 - 成本价对应 `costPrice`；若用户未提供成本价，可省略。
 - 用户提到“N天日K”时，对应 `count`。
-- `start_daily_update` 创建 09:20 盘前资讯、15:25 日更、20:00 收盘复盘三个 Hermes cron 任务；不要把它和一次性的 `update_all` 混淆。
+- `start_daily_update` 启动 09:20 盘前资讯、15:25 日更、20:00 收盘复盘的 Hermes 进程内后台线程；不要把它和一次性的 `update_all` 混淆。
 - 新闻、公告、研报、政策和事件类问题优先用 `mx_search`。
 - 官方数据、行情、财务和公司信息类问题优先用 `mx_data`。
 - 自然语言找股票优先用 `mx_select_stock`；需要候选池和补数据时用 `screen_stock_candidates`。

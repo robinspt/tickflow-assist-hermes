@@ -8,7 +8,7 @@ from pathlib import Path
 from tickflow_assist import schemas, tools
 from tickflow_assist.alert_media import _normalize_points, _scale_trading_x
 from tickflow_assist.clients import _extract_jin10_structured_result, _parse_json_rpc, _parse_json_rpc_batch, _repair_mojibake
-from tickflow_assist.core import _extract_cron_job_id, _flash_has_more, _flash_next_cursor, _flash_page_items
+from tickflow_assist.core import _flash_has_more, _flash_next_cursor, _flash_page_items
 from tickflow_assist.config import Config, load_config
 from tickflow_assist.core import App
 from tickflow_assist.plugin import register
@@ -43,8 +43,6 @@ class DispatchCtx:
 
     def dispatch_tool(self, name, args):
         self.calls.append((name, args))
-        if name == "cronjob":
-            return json.dumps({"success": True, "job_id": f"job-{len(self.calls)}"})
         return json.dumps({"success": True})
 
 
@@ -271,65 +269,68 @@ def test_send_alert_uses_hermes_target_and_media_tag():
     ]
 
 
-def test_start_daily_update_uses_hermes_cron_jobs():
+def test_start_daily_update_uses_hermes_thread_scheduler():
+    class MemoryStore:
+        def rows(self, name):
+            return []
+
     with tempfile.TemporaryDirectory() as tmp:
         app = App(Config(database_path=tmp, alert_delivery_target="telegram"))
-        ctx = DispatchCtx()
-        app.set_context(ctx)
-        previous_home = os.environ.get("HOME")
-        os.environ["HOME"] = tmp
+        app.store = MemoryStore()
+        result = app.start_daily_update()
+        state = app._read_daily_state()
         try:
-            result = app.start_daily_update()
+            assert "运行方式: hermes_thread" in result
+            assert "盘前资讯: 交易日 09:20" in result
+            assert state["running"] is True
+            assert state["runtimeHost"] == "hermes_thread"
+            assert state["jobIds"] == []
+            assert app.daily_thread and app.daily_thread.is_alive()
         finally:
-            if previous_home is None:
-                os.environ.pop("HOME", None)
-            else:
-                os.environ["HOME"] = previous_home
-
-    assert "Hermes cron" in result
-    cron_calls = [args for name, args in ctx.calls if name == "cronjob"]
-    assert [call["action"] for call in cron_calls] == ["create", "create", "create"]
-    assert [call["schedule"] for call in cron_calls] == ["20 9 * * 1-5", "25 15 * * 1-5", "0 20 * * 1-5"]
-    assert all(call["deliver"] == "telegram" for call in cron_calls)
-    assert all(call["no_agent"] is True for call in cron_calls)
-    assert [call["script"] for call in cron_calls] == [
-        "tickflow-assist-pre-market-brief.py",
-        "tickflow-assist-update-all.py",
-        "tickflow-assist-post-close-review.py",
-    ]
+            app.stop_daily_update()
+            if app.daily_thread:
+                app.daily_thread.join(timeout=2)
 
 
 def test_start_daily_update_migrates_old_two_job_schedule():
+    class MemoryStore:
+        def rows(self, name):
+            return []
+
     with tempfile.TemporaryDirectory() as tmp:
         app = App(Config(database_path=tmp, alert_delivery_target="telegram"))
-        ctx = DispatchCtx()
-        app.set_context(ctx)
+        app.store = MemoryStore()
         app._write_daily_state({"running": True, "scheduleVersion": 1, "jobIds": ["old-daily", "old-review"]})
-
-        previous_home = os.environ.get("HOME")
-        os.environ["HOME"] = tmp
         try:
             result = app.start_daily_update()
+            state = app._read_daily_state()
         finally:
-            if previous_home is None:
-                os.environ.pop("HOME", None)
-            else:
-                os.environ["HOME"] = previous_home
-        state = app._read_daily_state()
+            app.stop_daily_update()
+            if app.daily_thread:
+                app.daily_thread.join(timeout=2)
 
-    cron_calls = [args for name, args in ctx.calls if name == "cronjob"]
-    assert [call["action"] for call in cron_calls] == ["remove", "remove", "create", "create", "create"]
     assert state["scheduleVersion"] == 2
-    assert len(state["jobIds"]) == 3
-    assert "已移除旧任务" in result
+    assert state["jobIds"] == []
+    assert "已忽略旧 Hermes cron 任务记录: old-daily, old-review" in result
 
 
-def test_extract_cron_job_id_accepts_common_response_shapes():
-    assert _extract_cron_job_id({"job_id": "abc123"}) == "abc123"
-    assert _extract_cron_job_id({"job": {"id": "def456"}}) == "def456"
-    assert _extract_cron_job_id({"data": {"jobId": "ghi789"}}) == "ghi789"
-    assert _extract_cron_job_id({"success": True, "message": "Set up. Job ID: mno345"}) == "mno345"
-    assert _extract_cron_job_id("Created job id: jkl012") == "jkl012"
+def test_daily_update_status_marks_stale_running_state():
+    with tempfile.TemporaryDirectory() as tmp:
+        app = App(Config(database_path=tmp))
+        app._write_daily_state(
+            {
+                "running": True,
+                "lastHeartbeatAt": "2026-05-05 15:21:08",
+                "runtimeHost": "hermes_thread",
+            }
+        )
+
+        text = app.daily_update_status()
+
+    assert "状态: ⚠️ 已启用但后台未正常心跳" in text
+    assert "运行方式: hermes_thread" in text
+    assert "后台线程: 未运行" in text
+    assert "已超时" in text
 
 
 def test_monitor_status_marks_stale_running_state():

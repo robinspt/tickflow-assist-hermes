@@ -52,7 +52,7 @@ PRE_MARKET_BRIEF_READY_TIME = "09:20"
 DAILY_UPDATE_READY_TIME = "15:25"
 POST_CLOSE_REVIEW_READY_TIME = "20:00"
 DAILY_SCHEDULE_VERSION = 2
-CRON_SCRIPT_PREFIX = "tickflow-assist"
+DAILY_UPDATE_LOOP_INTERVAL_SECONDS = 60
 MONITOR_STALE_GRACE_SECONDS = 90
 DAILY_UPDATE_STALE_GRACE_SECONDS = 20 * 60
 UNIVERSE_CACHE_REFRESH_SECONDS = 24 * 60 * 60
@@ -130,8 +130,11 @@ class App:
         self.ctx: Any = None
         self.monitor_thread: threading.Thread | None = None
         self.monitor_stop = threading.Event()
+        self.daily_thread: threading.Thread | None = None
+        self.daily_stop = threading.Event()
         self.flash_thread: threading.Thread | None = None
         self.flash_stop = threading.Event()
+        self.state_lock = threading.RLock()
         self._calendar_days: set[str] | None = None
 
     def set_context(self, ctx: Any) -> None:
@@ -570,85 +573,47 @@ class App:
         return "\n".join(lines)
 
     def start_daily_update(self) -> str:
-        if self.ctx is None:
-            return "❌ 需要在 Hermes 会话中启动定时日更，以便调用内置 cronjob 工具。"
-
         state = self._read_daily_state()
-        job_ids = list(state.get("jobIds") or [])
-        schedule_ready = state.get("running") and state.get("scheduleVersion") == DAILY_SCHEDULE_VERSION and len(job_ids) >= 3
-        if schedule_ready:
-            state.update({"runtimeHost": "hermes_cron", "runtimeObservedAt": now_text()})
-            self._write_daily_state(state)
-            return "\n".join(["✅ TickFlow 定时任务已启动", "运行方式: hermes_cron", "任务: " + ", ".join(job_ids)])
-
-        removed: list[str] = []
-        for job_id in job_ids:
-            try:
-                self.ctx.dispatch_tool("cronjob", {"action": "remove", "job_id": job_id})
-                removed.append(str(job_id))
-            except Exception:
-                pass
-
-        jobs = [
-            self._create_cron_job(
-                name="TickFlow Assist 盘前资讯",
-                schedule="20 9 * * 1-5",
-                command="pre_market_brief",
-            ),
-            self._create_cron_job(
-                name="TickFlow Assist 日更",
-                schedule="25 15 * * 1-5",
-                command="update_all",
-            ),
-            self._create_cron_job(
-                name="TickFlow Assist 收盘复盘",
-                schedule="0 20 * * 1-5",
-                command="post_close_review",
-            ),
-        ]
-        new_job_ids = [str(job["jobId"]) for job in jobs if job.get("jobId")]
-        if len(new_job_ids) < 3:
-            details = "; ".join(f"{job.get('name')}: {job.get('detail')}" for job in jobs if not job.get("jobId"))
-            state.update({"running": False, "scheduleVersion": DAILY_SCHEDULE_VERSION, "runtimeObservedAt": now_text(), "jobIds": new_job_ids, "lastErrorAt": now_text(), "lastError": _truncate(f"Hermes cronjob did not return job_id: {details}", 1200)})
-            self._write_daily_state(state)
-            return "❌ Hermes cron 任务创建失败，请确认 cronjob 工具在当前 Hermes 会话可用。\n" + _truncate(details, 800)
-        state.update({"running": True, "scheduleVersion": DAILY_SCHEDULE_VERSION, "startedAt": state.get("startedAt") or now_text(), "lastStoppedAt": None, "runtimeHost": "hermes_cron", "runtimeObservedAt": now_text(), "jobIds": new_job_ids, "lastError": None, "lastErrorAt": None})
+        old_job_ids = list(state.get("jobIds") or [])
+        state.update({"running": True, "scheduleVersion": DAILY_SCHEDULE_VERSION, "startedAt": state.get("startedAt") or now_text(), "lastStoppedAt": None, "runtimeHost": "hermes_thread", "runtimeObservedAt": now_text(), "jobIds": [], "lastError": None, "lastErrorAt": None})
         self._write_daily_state(state)
-        lines = ["✅ TickFlow 定时任务已交给 Hermes cron", f"盘前资讯: 交易日 {PRE_MARKET_BRIEF_READY_TIME}", f"日更: 交易日 {DAILY_UPDATE_READY_TIME}", f"复盘: 交易日 {POST_CLOSE_REVIEW_READY_TIME}", f"任务: {', '.join(new_job_ids)}"]
-        if removed:
-            lines.append(f"已移除旧任务: {', '.join(removed)}")
+        if not self.daily_thread or not self.daily_thread.is_alive():
+            self.daily_stop.clear()
+            self.daily_thread = threading.Thread(target=self._daily_update_loop, daemon=True)
+            self.daily_thread.start()
+        lines = ["✅ TickFlow 定时任务已启动", "运行方式: hermes_thread", f"盘前资讯: 交易日 {PRE_MARKET_BRIEF_READY_TIME}", f"日更: 交易日 {DAILY_UPDATE_READY_TIME}", f"复盘: 交易日 {POST_CLOSE_REVIEW_READY_TIME}", f"轮询间隔: {DAILY_UPDATE_LOOP_INTERVAL_SECONDS} 秒"]
+        if old_job_ids:
+            lines.append(f"已忽略旧 Hermes cron 任务记录: {', '.join(str(item) for item in old_job_ids)}")
         return "\n".join(lines)
 
     def stop_daily_update(self) -> str:
+        self.daily_stop.set()
         state = self._read_daily_state()
-        job_ids = list(state.get("jobIds") or [])
-        removed: list[str] = []
-        if self.ctx is not None:
-            for job_id in job_ids:
-                try:
-                    self.ctx.dispatch_tool("cronjob", {"action": "remove", "job_id": job_id})
-                    removed.append(str(job_id))
-                except Exception:
-                    pass
         state.update({"running": False, "lastStoppedAt": now_text()})
         state.pop("jobIds", None)
         self._write_daily_state(state)
-        return "🛑 TickFlow 定时日更已停止" + (f"\n已移除 Hermes cron 任务: {', '.join(removed)}" if removed else "")
+        return "🛑 TickFlow 定时任务已停止"
 
     def daily_update_status(self) -> str:
         state = self._read_daily_state()
         today = today_text()
-        job_ids = list(state.get("jobIds") or [])
-        schedule_ok = state.get("running") and state.get("scheduleVersion") == DAILY_SCHEDULE_VERSION and len(job_ids) >= 3
-        status = "✅ 运行中" if schedule_ok else ("⚠️ 计划需重建" if state.get("running") else "⭕ 未启动")
+        thread_alive = bool(self.daily_thread and self.daily_thread.is_alive())
+        stale = _state_heartbeat_stale(state, DAILY_UPDATE_LOOP_INTERVAL_SECONDS, DAILY_UPDATE_STALE_GRACE_SECONDS)
+        if state.get("running") and thread_alive and not stale:
+            status = "✅ 运行中"
+        elif state.get("running"):
+            status = "⚠️ 已启用但后台未正常心跳"
+        else:
+            status = "⭕ 未启动"
         lines = [
             "🕒 盘前资讯 / 定时日更 / 收盘复盘状态",
             f"状态: {status}",
-            "运行方式: hermes_cron",
+            "运行方式: hermes_thread",
             "配置来源: Hermes plugin/env/local.config.json",
             f"调度: 盘前资讯 {PRE_MARKET_BRIEF_READY_TIME} | 日更 {DAILY_UPDATE_READY_TIME} | 复盘 {POST_CLOSE_REVIEW_READY_TIME} | 交易日周一至周五",
-            f"Hermes cron 任务: {', '.join(job_ids) or '暂无'}",
-            f"最近注册: {state.get('runtimeObservedAt') or '暂无'}",
+            f"轮询间隔: {DAILY_UPDATE_LOOP_INTERVAL_SECONDS} 秒",
+            f"后台线程: {'存活' if thread_alive else '未运行'}",
+            f"最近心跳: {_format_heartbeat(state.get('lastHeartbeatAt'), DAILY_UPDATE_LOOP_INTERVAL_SECONDS, DAILY_UPDATE_STALE_GRACE_SECONDS) or '暂无'}",
             "",
             "盘前资讯:",
             f"• 今日已推送: {'是' if state.get('lastPreMarketSuccessDate') == today else '否'}",
@@ -961,73 +926,6 @@ class App:
         except Exception as exc:
             return False, str(exc)
 
-    def _create_cron_job(self, name: str, schedule: str, command: str) -> dict[str, Any]:
-        try:
-            script_name = self._write_cron_script(command)
-        except Exception as exc:
-            return {"name": name, "jobId": None, "detail": f"script write failed: {exc}"}
-        payload: dict[str, Any] = {"action": "create", "name": name, "schedule": schedule, "script": script_name, "no_agent": True}
-        if not self.config.daily_update_notify:
-            payload["deliver"] = "local"
-        elif self.config.alert_delivery_target:
-            payload["deliver"] = self.config.alert_delivery_target
-        try:
-            result = self.ctx.dispatch_tool("cronjob", payload)
-            parsed = json.loads(result) if isinstance(result, str) else result
-            job_id = _extract_cron_job_id(parsed)
-            return {"name": name, "jobId": job_id, "detail": _compact_json(parsed), "payload": payload}
-        except Exception as exc:
-            return {"name": name, "jobId": None, "detail": f"{type(exc).__name__}: {exc}", "payload": payload}
-
-    def _write_cron_script(self, command: str) -> str:
-        if command not in {"pre_market_brief", "update_all", "post_close_review"}:
-            raise ValueError(f"unsupported cron command: {command}")
-        scripts_dir = Path.home() / ".hermes" / "scripts"
-        scripts_dir.mkdir(parents=True, exist_ok=True)
-        script_name = f"{CRON_SCRIPT_PREFIX}-{command.replace('_', '-')}.py"
-        script_path = scripts_dir / script_name
-        root = str(self.plugin_root)
-        content = f"""from __future__ import annotations
-
-import json
-import sys
-from pathlib import Path
-
-ROOT = Path({root!r})
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-try:
-    from hermes_bootstrap import add_local_venv_site_packages
-    add_local_venv_site_packages(ROOT)
-except Exception:
-    pass
-
-from tickflow_assist import tools
-
-HANDLERS = {{
-    "pre_market_brief": tools.pre_market_brief,
-    "update_all": tools.update_all,
-    "post_close_review": tools.post_close_review,
-}}
-
-payload = HANDLERS[{command!r}]({{"scheduled": True}})
-try:
-    parsed = json.loads(payload) if isinstance(payload, str) else payload
-except Exception:
-    parsed = {{"text": str(payload)}}
-if isinstance(parsed, dict):
-    text = parsed.get("text") or parsed.get("error") or ""
-else:
-    text = str(parsed)
-if text:
-    print(str(text).rstrip())
-"""
-        existing = script_path.read_text(encoding="utf-8") if script_path.exists() else None
-        if existing != content:
-            script_path.write_text(content, encoding="utf-8")
-        return script_name
-
     def _monitor_loop(self) -> None:
         while not self.monitor_stop.is_set():
             state = self._read_state("monitor-state.json")
@@ -1093,6 +991,43 @@ if text:
                     if media_path:
                         remove_alert_media(media_path)
                     self.store.add("alert_log", [{"symbol": item["symbol"], "alert_date": today_text(), "rule_name": key, "message": message, "triggered_at": now_text()}])
+
+    def _daily_update_loop(self) -> None:
+        while not self.daily_stop.is_set():
+            state = self._read_daily_state()
+            if state.get("running"):
+                now = now_text()
+                state.update({"lastHeartbeatAt": now, "runtimeHost": "hermes_thread", "runtimeObservedAt": now})
+                self._write_daily_state(state)
+                try:
+                    self._daily_update_once()
+                except Exception as exc:
+                    latest = self._read_daily_state()
+                    latest.update({"lastError": str(exc), "lastErrorAt": now_text()})
+                    self._write_daily_state(latest)
+            self.daily_stop.wait(DAILY_UPDATE_LOOP_INTERVAL_SECONDS)
+
+    def _daily_update_once(self) -> None:
+        state = self._read_daily_state()
+        today = today_text()
+        hhmm = now_cn().strftime("%H:%M")
+        if hhmm >= PRE_MARKET_BRIEF_READY_TIME and _should_run_scheduled_task(state, "lastPreMarketAttemptDate", "lastPreMarketSuccessDate", today):
+            self._run_daily_scheduled_action(lambda: self.pre_market_brief(scheduled=True))
+        state = self._read_daily_state()
+        if hhmm >= DAILY_UPDATE_READY_TIME and _should_run_scheduled_task(state, "lastAttemptDate", "lastSuccessDate", today):
+            self._run_daily_scheduled_action(lambda: self.update_all(scheduled=True))
+        state = self._read_daily_state()
+        if hhmm >= POST_CLOSE_REVIEW_READY_TIME and _should_run_scheduled_task(state, "lastReviewAttemptDate", "lastReviewSuccessDate", today):
+            if state.get("lastSuccessDate") != today:
+                message = f"今日日更尚未在 {DAILY_UPDATE_READY_TIME} 后成功完成，暂不执行收盘复盘"
+                self._record_review_result("skipped", message, now_text(), today)
+            else:
+                self._run_daily_scheduled_action(lambda: self.post_close_review(scheduled=True))
+
+    def _run_daily_scheduled_action(self, fn) -> None:
+        message = fn()
+        if self.config.daily_update_notify and not str(message).startswith("[SILENT]"):
+            self.send_alert(message)
 
     def _write_alert_card(
         self,
@@ -1396,15 +1331,21 @@ if text:
 
     def _read_state(self, name: str) -> dict[str, Any]:
         path = self._state_path(name)
-        if not path.exists():
-            return {}
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+        with self.state_lock:
+            if not path.exists():
+                return {}
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                return {}
 
     def _write_state(self, name: str, state: dict[str, Any]) -> None:
-        self._state_path(name).write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        path = self._state_path(name)
+        tmp_path = path.with_name(f".{path.name}.{threading.get_ident()}.tmp")
+        data = json.dumps(state, ensure_ascii=False, indent=2)
+        with self.state_lock:
+            tmp_path.write_text(data, encoding="utf-8")
+            tmp_path.replace(path)
 
 
 def _extract_levels(text: str) -> dict[str, Any] | None:
@@ -1789,45 +1730,8 @@ def _format_task_result(value: Any) -> str:
     return {"success": "成功", "failed": "失败", "skipped": "跳过"}.get(str(value or ""), "暂无")
 
 
-def _extract_cron_job_id(value: Any) -> str | None:
-    if isinstance(value, dict):
-        for key in ["job_id", "jobId", "id"]:
-            text = str(value.get(key) or "").strip()
-            if text:
-                return text
-        for key in ["job", "data", "result"]:
-            nested = _extract_cron_job_id(value.get(key))
-            if nested:
-                return nested
-        jobs = value.get("jobs")
-        if isinstance(jobs, list):
-            for item in jobs:
-                nested = _extract_cron_job_id(item)
-                if nested:
-                    return nested
-        for nested_value in value.values():
-            if isinstance(nested_value, (dict, list, str)):
-                nested = _extract_cron_job_id(nested_value)
-                if nested:
-                    return nested
-    if isinstance(value, list):
-        for item in value:
-            nested = _extract_cron_job_id(item)
-            if nested:
-                return nested
-    if isinstance(value, str):
-        match = re.search(r"(?:job[_\s-]?id|id)\s*[:=]\s*([A-Za-z0-9_-]{6,})", value, re.IGNORECASE)
-        if match:
-            return match.group(1)
-    return None
-
-
-def _compact_json(value: Any, limit: int = 500) -> str:
-    try:
-        text = json.dumps(value, ensure_ascii=False, default=str)
-    except Exception:
-        text = str(value)
-    return _truncate(text, limit)
+def _should_run_scheduled_task(state: dict[str, Any], attempt_key: str, success_key: str, today: str) -> bool:
+    return state.get(attempt_key) != today and state.get(success_key) != today
 
 
 def _summarize_task_message(value: str, limit: int = 220) -> str:

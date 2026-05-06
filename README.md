@@ -10,7 +10,7 @@
 - Python 负责插件注册、工具实现、TickFlow/MX/Jin10/LLM 调用与实时监控循环
 - LanceDB 保持原表结构，不迁移为其他数据库
 - 技术指标由 Python/pandas/numpy 计算
-- 盘前资讯、定时日更与收盘复盘使用 Hermes script-only `cronjob`，不经过 LLM
+- 盘前资讯、定时日更与收盘复盘使用 Hermes 进程内 daemon thread，不依赖 `cronjob` 工具
 - 告警消息使用 Hermes `send_message`，PNG 图片通过 `MEDIA:/path/to/file` 附加
 
 ## 安装
@@ -92,7 +92,7 @@ export TICKFLOW_ASSIST_ALERT_IMAGE_ENABLED="true"
 - 数据：`fetch_klines`、`fetch_intraday_klines`、`fetch_financials`、`update_all`
 - 分析：`analyze`、`view_analysis`、`backtest_key_levels`
 - 监控：`start_monitor`、`stop_monitor`、`monitor_status`
-- 定时任务：`pre_market_brief`、`post_close_review`、`start_daily_update`、`stop_daily_update`、`daily_update_status`，内部创建/移除 Hermes cron jobs
+- 定时任务：`pre_market_brief`、`post_close_review`、`start_daily_update`、`stop_daily_update`、`daily_update_status`，内部使用 Hermes 进程线程定时调度
 - 数据库：`query_database`
 - 妙想/东方财富：`mx_search`、`mx_data`、`mx_select_stock`、`screen_stock_candidates`、`list_eastmoney_watchlist`、`sync_eastmoney_watchlist`、`push_eastmoney_watchlist`、`remove_eastmoney_watchlist`
 - 金十：`flash_monitor_status`，插件启动且 Jin10 token 已配置时会在 Hermes 进程内自动启动后台轮询，状态包含心跳、最近轮询、最近一轮入库/候选/告警、今日统计、续页补齐、最近异常和最新快讯。
