@@ -61,6 +61,16 @@ sudo apt install python3-venv
 
 如果报 `Permission denied: .venv`，说明项目目录或已有 `.venv` 权限不属于当前用户，可直接使用上面的 `TICKFLOW_ASSIST_VENV=...` 方式。
 
+Hermes 插件默认是 opt-in。源码目录链接到 `~/.hermes/plugins/tickflow-assist` 后，还需要显式启用插件：
+
+```bash
+hermes plugins enable tickflow-assist
+hermes plugins list
+hermes gateway restart
+```
+
+也可以运行 `hermes plugins` 打开交互式插件管理界面，用空格勾选 `tickflow-assist`。
+
 重启 Hermes gateway 后，Hermes chat / CLI 的 `/plugins` 应能看到 `tickflow-assist`。Telegram / Discord 消息端可用 `/commands` 查看 gateway 当前命令；如果 `/ta_*` 不在列表里，说明 gateway 尚未加载插件命令，执行 `hermes gateway restart` 或在聊天里用 `/restart`。Discord 全局命令可能有短暂传播延迟。
 
 如果 `/plugins` 正常，但命令执行时报缺少 `lancedb`、`pandas`、`pyarrow` 等 Python 依赖，请先重新执行 `./setup-tickflow.sh` 并重启 Hermes。脚本会优先使用 Hermes 自己的 Python，并在已有 `.venv` Python 版本不匹配时自动挪走旧环境后重建；仍失败时运行 `/ta_debug`，把其中的 Python、虚拟环境记录、依赖状态和 Python 路径用于排查。

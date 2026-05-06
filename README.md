@@ -45,7 +45,9 @@ TickFlow Assist Hermes 面向一条完整的“自选管理 -> 数据抓取 -> �
 
 如果你是从 GitHub 仓库开始安装，优先建议使用一键安装脚本。脚本会创建 Python 虚拟环境、安装依赖、链接 Hermes 插件目录，并生成或更新本地配置。
 
-### 一键安装脚本（首选）
+### 源码安装
+
+#### 一键安装脚本（首选）
 
 ```bash
 git clone https://github.com/robinspt/tickflow-assist-hermes.git
@@ -75,7 +77,7 @@ sudo apt install python3-venv
 TICKFLOW_ASSIST_VENV=~/.local/share/tickflow-assist-hermes/venv ./setup-tickflow.sh
 ```
 
-### 手动源码安装
+#### 手动源码安装
 
 ```bash
 git clone https://github.com/robinspt/tickflow-assist-hermes.git
@@ -86,9 +88,21 @@ mkdir -p ~/.hermes/plugins
 ln -s "$(pwd)" ~/.hermes/plugins/tickflow-assist
 ```
 
+#### 启用插件
+
+Hermes 插件默认是 opt-in。源码目录链接到 `~/.hermes/plugins/tickflow-assist` 后，还需要显式启用插件：
+
+```bash
+hermes plugins enable tickflow-assist
+hermes plugins list
+hermes gateway restart
+```
+
+也可以运行 `hermes plugins` 打开交互式插件管理界面，用空格勾选 `tickflow-assist`。
+
 重启 Hermes gateway 后，在 Hermes chat / CLI 中运行 `/plugins`，应能看到 `tickflow-assist`。Telegram / Discord 消息端可运行 `/commands` 查看 gateway 当前注册的命令；如果 `/ta_*` 不在列表里，说明 gateway 进程尚未加载插件命令，需要重启 gateway。Discord 全局命令有传播延迟，通常需要等待一小段时间。
 
-### 配置方式
+#### 配置方式
 
 安装脚本默认生成仓库根目录的 `local.config.json`，插件读取其中的 `plugin` 字段。本仓库提供 [local.config.example.json](local.config.example.json)。
 
