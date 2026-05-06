@@ -149,7 +149,7 @@ hermes gateway restart
 
 也可以运行 `hermes plugins` 打开交互式插件管理界面，用空格勾选 `tickflow-assist`。
 
-重启 Hermes gateway 后，在 Hermes chat / CLI 中运行 `/plugins`，应能看到 `tickflow-assist`。Telegram / Discord 消息端可运行 `/commands` 查看 gateway 当前注册的命令；如果 `/ta_*` 不在列表里，说明 gateway 进程尚未加载插件命令，需要重启 gateway。Discord 全局命令有传播延迟，通常需要等待一小段时间。
+重启 Hermes gateway 后，在 Hermes chat / CLI 中运行 `/plugins`，应能看到 `tickflow-assist`。Telegram 可在命令列表中选择 `/ta_*` 命令并直接使用；Discord 目前不会在 `/` 菜单展示插件命令，但可以手动输入 `/ta_*` 或 `/ta-*` 命令触发。如果 Telegram 没有显示 `/ta_*`，说明 gateway 进程尚未加载插件命令，需要重启 gateway。
 
 ## 🔄 升级
 
@@ -194,7 +194,7 @@ print(add_stock({"symbol": "002261", "costPrice": 34.15}))
 PY
 ```
 
-Hermes 中注册 `/ta_` 插件 Slash Commands，handler 直接调用工具并返回 `text`，不会加载 skill，也不会走模型规划。Telegram / Discord 需要 gateway 的 `/commands` 列表中出现这些命令后才能用 `/ta_*` 触发。本插件同时注册 `ta-*` 兼容别名，因为 Hermes gateway 在 Telegram 分发插件命令时会把下划线命令名转换为连字符后查找；Telegram 菜单显示 `/ta_*`。
+Hermes 中注册 `/ta_` 插件 Slash Commands，handler 直接调用工具并返回 `text`，不会加载 skill，也不会走模型规划。Telegram 可从命令列表选择 `/ta_*`；Discord 菜单目前不展示插件命令，需要手动输入 `/ta_*` 或 `/ta-*`。本插件同时注册 `ta-*` 兼容别名，因为 Hermes gateway 在消息端分发插件命令时可能会把下划线命令名转换为连字符后查找；Telegram 菜单显示 `/ta_*`。
 
 更完整的指令分类、Slash Command 列表与运行规则见 [docs/usage.md](docs/usage.md)。
 

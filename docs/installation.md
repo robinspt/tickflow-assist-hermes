@@ -73,7 +73,7 @@ hermes gateway restart
 
 也可以运行 `hermes plugins` 打开交互式插件管理界面，用空格勾选 `tickflow-assist`。
 
-重启 Hermes gateway 后，Hermes chat / CLI 的 `/plugins` 应能看到 `tickflow-assist`。Telegram / Discord 消息端可用 `/commands` 查看 gateway 当前命令；如果 `/ta_*` 不在列表里，说明 gateway 尚未加载插件命令，执行 `hermes gateway restart` 或在聊天里用 `/restart`。Discord 全局命令可能有短暂传播延迟。
+重启 Hermes gateway 后，Hermes chat / CLI 的 `/plugins` 应能看到 `tickflow-assist`。Telegram 可在命令列表中选择 `/ta_*` 命令并直接使用；Discord 目前不会在 `/` 菜单展示插件命令，但可以手动输入 `/ta_*` 或 `/ta-*` 命令触发。如果 Telegram 没有显示 `/ta_*`，说明 gateway 尚未加载插件命令，执行 `hermes gateway restart` 或在聊天里用 `/restart`。
 
 如果 `/plugins` 正常，但命令执行时报缺少 `lancedb`、`pandas`、`pyarrow` 等 Python 依赖，请先重新执行 `./setup-tickflow.sh` 并重启 Hermes。脚本会优先使用 Hermes 自己的 Python，并在已有 `.venv` Python 版本不匹配时自动挪走旧环境后重建；仍失败时运行 `/ta_debug`，把其中的 Python、虚拟环境记录、依赖状态和 Python 路径用于排查。
 
@@ -81,17 +81,14 @@ hermes gateway restart
 
 插件提供独立命令 `/ta_addstock`、`/ta_analyze`、`/ta_watchlist` 等。它们由 Hermes 插件 `register_command` 注册，handler 直接调用工具并返回 `text`，不会加载 skill，也不会走模型规划。
 
-插件还会注册同名 `ta-*` 兼容别名，用于适配 Hermes gateway 在 Telegram 分发插件命令时将下划线转换为连字符的查找逻辑；Telegram 菜单仍显示 `/ta_*`，实际执行仍走同一个直接 handler。
+插件还会注册同名 `ta-*` 兼容别名，用于适配 Hermes gateway 在消息端分发插件命令时可能将下划线转换为连字符的查找逻辑；Telegram 菜单显示 `/ta_*`，实际执行仍走同一个直接 handler。
 
 - Hermes chat / CLI：直接选择或输入 `/ta_addstock`、`/ta_analyze`、`/ta_testalert` 等。
-- Telegram / Discord：先用 `/commands` 确认列表中有 `/ta_watchlist`、`/ta_testalert` 等命令，然后直接发送 `/ta_*`。
+- Telegram：可从命令列表选择 `/ta_watchlist`、`/ta_testalert` 等命令，也可以直接发送 `/ta_*`。
+- Discord：目前不会在 `/` 菜单展示插件命令，但可以手动输入 `/ta_*` 或 `/ta-*`，例如 `/ta_watchlist`、`/ta-testalert`。
 - 如果 Telegram 回复 `Unknown command /ta_watchlist`，不是插件 handler 报错，而是 gateway 在进入插件前没有识别该命令；先重启 gateway，确认消息端和 Hermes chat / CLI 使用同一个 Hermes profile / `$HOME`，必要时升级 Hermes 到包含插件 `register_command()` gateway 支持的版本。
 
-如果 Discord 里仍看不到命令：
-
-- 先看 Discord `/` 菜单是否有 Hermes 内置 `/model`。如果内置命令也没有，通常是 bot 没有用 `applications.commands` scope 邀请，或 `DISCORD_COMMAND_SYNC_POLICY=off` / `slash_commands: false` 禁用了同步。
-- 如果内置命令存在但 `/ta_*` 不存在，说明当前 gateway 没有加载插件命令；检查插件是否启用、gateway 是否重启，以及消息端 gateway 是否运行在同一个 `~/.hermes`。
-- 如必须要 Discord 菜单可选择且 Hermes 版本不支持插件命令同步，只能使用 skill 入口，但会有额外加载和 token 开销。
+如果 Discord 手输 `/ta_*` 或 `/ta-*` 返回 unknown，才需要检查插件是否启用、gateway 是否重启，以及消息端 gateway 是否运行在同一个 `~/.hermes`。
 
 ## 手动源码安装配置（跳过安装脚本时）
 

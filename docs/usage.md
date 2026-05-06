@@ -51,9 +51,9 @@
 
 这些命令由 Hermes 插件 `register_command` 直接注册，handler 直接调用工具并返回 `text`，不会加载 skill，也不会走模型规划。`setup-tickflow.sh` 会清理旧的 `ta-*` / `ta_*` skill 链接，避免 Hermes chat 继续显示重复入口。
 
-插件同时注册 `ta-*` 兼容别名，用于适配 Hermes gateway 在 Telegram 分发插件命令时会把下划线转换为连字符的查找逻辑；Telegram 菜单仍显示 `/ta_*`，实际执行不经过 skill。
+插件同时注册 `ta-*` 兼容别名，用于适配 Hermes gateway 在消息端分发插件命令时可能把下划线转换为连字符的查找逻辑；Telegram 菜单显示 `/ta_*`，实际执行不经过 skill。
 
-Telegram / Discord 端先用 `/commands` 确认 gateway 已加载 `/ta_*` 命令。如果消息端回复 `Unknown command /ta_watchlist`，说明 gateway 在进入插件前就拦截了该 slash command；请重启 gateway，并确认消息端 gateway 与 Hermes chat / CLI 使用同一个 Hermes profile / `$HOME`。
+Telegram 可从命令列表选择 `/ta_*` 并直接使用。Discord 目前不会在 `/` 菜单展示插件命令，但可以手动输入 `/ta_*` 或 `/ta-*`，例如 `/ta_watchlist`、`/ta-testalert`。如果消息端回复 `Unknown command /ta_watchlist`，说明 gateway 在进入插件前就拦截了该 slash command；请重启 gateway，并确认消息端 gateway 与 Hermes chat / CLI 使用同一个 Hermes profile / `$HOME`。
 
 `/ta_debug` 不依赖 LanceDB 初始化成功也会输出诊断信息，包括 Hermes 当前 Python、虚拟环境记录、关键依赖导入状态和 Python 路径。若 `/plugins` 正常但其他命令提示缺少依赖，优先运行它确认 Hermes 是否加载到了安装脚本创建的虚拟环境。
 
