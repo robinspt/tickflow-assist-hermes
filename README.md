@@ -45,9 +45,7 @@ TickFlow Assist Hermes 面向一条完整的“自选管理 -> 数据抓取 -> �
 
 如果你是从 GitHub 仓库开始安装，优先建议使用一键安装脚本。脚本会创建 Python 虚拟环境、安装依赖、链接 Hermes 插件目录，并生成或更新本地配置。
 
-### 源码安装
-
-#### 一键安装脚本（首选）
+### 一键安装脚本（首选）
 
 ```bash
 git clone https://github.com/robinspt/tickflow-assist-hermes.git
@@ -79,7 +77,7 @@ TICKFLOW_ASSIST_VENV=~/.local/share/tickflow-assist-hermes/venv ./setup-tickflow
 
 脚本完成后无需手动配置，直接执行下方“启用插件”步骤。
 
-#### 手动源码安装
+### 手动源码安装
 
 ```bash
 git clone https://github.com/robinspt/tickflow-assist-hermes.git
@@ -139,7 +137,7 @@ export TICKFLOW_ASSIST_ALERT_IMAGE_ENABLED="true"
 - `discord:999888777`：发送到指定 Discord channel
 - `slack`：发送到 Slack home channel
 
-#### 启用插件
+### 启用插件
 
 Hermes 插件默认是 opt-in。源码目录链接到 `~/.hermes/plugins/tickflow-assist` 后，还需要显式启用插件：
 
