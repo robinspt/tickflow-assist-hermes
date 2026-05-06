@@ -570,6 +570,10 @@ class App:
         ]
         if state.get("lastLoopError"):
             lines.append(f"最近异常: {state.get('lastLoopErrorAt') or '未知时间'} | {state.get('lastLoopError')}")
+        if state.get("lastSessionNotificationError"):
+            lines.append(f"最近阶段提醒异常: {state.get('lastSessionNotificationErrorAt') or '未知时间'} | {state.get('lastSessionNotificationError')}")
+        if state.get("lastSessionNotificationSentAt"):
+            lines.append(f"最近阶段提醒: {state.get('lastSessionNotificationSentAt')} | {state.get('lastSessionNotificationId') or '-'}")
         lines.append(self.list_watchlist())
         return "\n".join(lines)
 
@@ -1037,27 +1041,43 @@ class App:
                 f"关注列表: {len(self.watchlist())}只",
             ],
         )
-        sent_ok = self._send_monitor_alert(SYSTEM_SESSION_ALERT_SYMBOL, event["id"], message)
+        sent_ok, detail = self._send_monitor_alert_result(SYSTEM_SESSION_ALERT_SYMBOL, event["id"], message)
         session_key = _monitor_session_key()
         if sent_ok or self._monitor_alert_sent(SYSTEM_SESSION_ALERT_SYMBOL, event["id"], session_key):
             if event["id"] not in next_state["sessionNotificationsSent"]:
                 next_state["sessionNotificationsSent"].append(event["id"])
+            next_state.update({
+                "lastSessionNotificationId": event["id"],
+                "lastSessionNotificationSentAt": now,
+                "lastSessionNotificationError": None,
+                "lastSessionNotificationErrorAt": None,
+            })
+        elif detail:
+            next_state.update({
+                "lastSessionNotificationId": event["id"],
+                "lastSessionNotificationError": detail,
+                "lastSessionNotificationErrorAt": now,
+            })
         self._write_state("monitor-state.json", next_state)
         return 1 if sent_ok else 0
 
     def _send_monitor_alert(self, symbol: str, rule_name: str, message: str, media_path: Path | None = None) -> bool:
+        ok, _ = self._send_monitor_alert_result(symbol, rule_name, message, media_path=media_path)
+        return ok
+
+    def _send_monitor_alert_result(self, symbol: str, rule_name: str, message: str, media_path: Path | None = None) -> tuple[bool, str | None]:
         session_key = _monitor_session_key()
         if self._monitor_alert_sent(symbol, rule_name, session_key):
             if media_path:
                 remove_alert_media(media_path)
-            return False
-        ok, _ = self.send_alert(message, media_path=media_path)
+            return False, "duplicate"
+        ok, detail = self.send_alert(message, media_path=media_path)
         if media_path:
             remove_alert_media(media_path)
         if not ok:
-            return False
+            return False, detail
         self.store.add("alert_log", [{"symbol": symbol, "alert_date": session_key, "rule_name": rule_name, "message": message, "triggered_at": now_text()}])
-        return True
+        return True, detail
 
     def _monitor_alert_sent(self, symbol: str, rule_name: str, session_key: str) -> bool:
         return any(
@@ -1820,14 +1840,14 @@ def _resolve_monitor_session_notification(previous_phase: str | None, current_ph
         "morning_start" not in sent
         and current_phase == "trading"
         and hhmm <= "11:30"
-        and (previous_phase == "pre_market" or (previous_phase != "trading" and _within_hhmm(hhmm, "09:30", "09:40")))
+        and (previous_phase == "pre_market" or _within_hhmm(hhmm, "09:30", "09:40"))
     ):
         return {"id": "morning_start", "title": "🔔 开始上午盯盘", "phaseText": "上午盘开盘"}
 
     if (
         "morning_end" not in sent
         and current_phase == "lunch_break"
-        and (previous_phase == "trading" or (previous_phase != "lunch_break" and _within_hhmm(hhmm, "11:30", "11:40")))
+        and (previous_phase == "trading" or _within_hhmm(hhmm, "11:30", "11:40"))
     ):
         return {"id": "morning_end", "title": "🔔 上午盯盘结束", "phaseText": "上午盘收盘"}
 
@@ -1835,14 +1855,14 @@ def _resolve_monitor_session_notification(previous_phase: str | None, current_ph
         "afternoon_start" not in sent
         and current_phase == "trading"
         and hhmm >= "13:00"
-        and (previous_phase == "lunch_break" or (previous_phase != "trading" and _within_hhmm(hhmm, "13:00", "13:10")))
+        and (previous_phase == "lunch_break" or _within_hhmm(hhmm, "13:00", "13:10"))
     ):
         return {"id": "afternoon_start", "title": "🔔 开始下午盯盘", "phaseText": "下午盘开盘"}
 
     if (
         "day_end" not in sent
         and current_phase == "closed"
-        and (previous_phase == "trading" or (previous_phase != "closed" and _within_hhmm(hhmm, "15:00", "15:10")))
+        and (previous_phase == "trading" or _within_hhmm(hhmm, "15:00", "15:10"))
     ):
         return {"id": "day_end", "title": "🔔 今日盯盘结束", "phaseText": "今日收盘"}
 

@@ -349,6 +349,90 @@ def test_monitor_once_sends_afternoon_start_notification_once():
         core_module.today_text = previous_today_text
 
 
+def test_monitor_session_notification_retries_after_send_failure_within_window():
+    class MemoryStore:
+        def __init__(self):
+            self.tables = {
+                "watchlist": [{"symbol": "002558.SZ", "name": "巨人网络", "costPrice": 32.79, "addedAt": "2026-05-06 09:30:00"}],
+                "key_levels": [],
+                "alert_log": [],
+            }
+
+        def rows(self, name):
+            return [dict(row) for row in self.tables.get(name, [])]
+
+        def add(self, name, rows):
+            self.tables.setdefault(name, []).extend(dict(row) for row in rows)
+
+    class FakeTickFlow:
+        def quotes(self, symbols):
+            return []
+
+    class FlakyDispatchCtx:
+        def __init__(self):
+            self.calls = []
+
+        def dispatch_tool(self, name, args):
+            self.calls.append((name, args))
+            if len(self.calls) == 1:
+                return json.dumps({"success": False, "error": "temporary send failed"})
+            return json.dumps({"success": True})
+
+    current = [datetime(2026, 5, 6, 15, 3, 0, tzinfo=timezone(timedelta(hours=8)))]
+    previous_now_cn = core_module.now_cn
+    previous_now_text = core_module.now_text
+    previous_today_text = core_module.today_text
+    core_module.now_cn = lambda: current[0]
+    core_module.now_text = lambda: current[0].strftime("%Y-%m-%d %H:%M:%S")
+    core_module.today_text = lambda: current[0].strftime("%Y-%m-%d")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStore()
+            app = App(Config(database_path=tmp, calendar_file=str(Path(tmp) / "missing-calendar.txt"), alert_delivery_target="telegram", alert_image_enabled=False))
+            app.store = store
+            app.tickflow = FakeTickFlow()
+            app.set_context(FlakyDispatchCtx())
+            app._write_state(
+                "monitor-state.json",
+                {
+                    "running": True,
+                    "lastObservedPhase": "trading",
+                    "lastObservedPhaseDate": "2026-05-06",
+                    "sessionNotificationsDate": "2026-05-06",
+                    "sessionNotificationsSent": ["afternoon_start"],
+                },
+            )
+
+            app._monitor_once()
+            failed_state = app._read_state("monitor-state.json")
+            current[0] = datetime(2026, 5, 6, 15, 4, 0, tzinfo=timezone(timedelta(hours=8)))
+            app._monitor_once()
+            state = app._read_state("monitor-state.json")
+
+        send_calls = [args for name, args in app.ctx.calls if name == "send_message"]
+        assert len(send_calls) == 2
+        assert "🔔 今日盯盘结束" in send_calls[0]["message"]
+        assert "🔔 今日盯盘结束" in send_calls[1]["message"]
+        assert failed_state["lastObservedPhase"] == "closed"
+        assert failed_state["lastSessionNotificationError"] == "temporary send failed"
+        assert failed_state["sessionNotificationsSent"] == ["afternoon_start"]
+        assert state["sessionNotificationsSent"] == ["afternoon_start", "day_end"]
+        assert state["lastSessionNotificationError"] is None
+        assert store.tables["alert_log"] == [
+            {
+                "symbol": "__system_session__",
+                "alert_date": "2026-05-06_PM",
+                "rule_name": "day_end",
+                "message": "🔔 今日盯盘结束\n\n时间: 2026-05-06 15:04:00\n阶段: 今日收盘\n关注列表: 1只",
+                "triggered_at": "2026-05-06 15:04:00",
+            }
+        ]
+    finally:
+        core_module.now_cn = previous_now_cn
+        core_module.now_text = previous_now_text
+        core_module.today_text = previous_today_text
+
+
 def test_start_daily_update_uses_hermes_thread_scheduler():
     class MemoryStore:
         def rows(self, name):
