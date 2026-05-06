@@ -47,6 +47,15 @@ PRE_MARKET_BRIEF_SYSTEM = """你是一位A股开盘前资讯简报编辑。基�
 3. 重点写清楚这些消息可能如何影响风险偏好、题材扩散和自选股观察点。
 4. 输出可直接投递到 Telegram/Discord 的纯文本。"""
 
+POST_CLOSE_REVIEW_SYSTEM = """你是一位A股收盘复盘分析师，需要在收盘后同时完成“昨日关键位验证 + 今日盘面复盘 + 明日关键位处理决定”。
+输出要求：
+1. 正文按“昨日关键位验证 / 今日盘面 / 大盘与板块 / 新闻与公告 / 明日关键位处理 / 操作建议”组织。
+2. “昨日关键位验证”必须严格依据输入的验证结果，不得改写成与数据冲突的结论。
+3. “明日关键位处理”必须明确给出四选一结论：keep / adjust / recompute / invalidate。
+4. 最后输出一个 ```json 代码块，字段包含 session_summary, market_sector_summary, news_summary, decision, decision_reason, action_advice, market_bias, sector_bias, news_impact, levels。
+5. levels 若不为 null，必须包含 current_price, stop_loss, breakthrough, support, cost_level, resistance, take_profit, gap, target, round_number, score。
+不要编造未提供的数据；不构成投资建议。"""
+
 PRE_MARKET_BRIEF_KEYWORD = "金十数据整理"
 PRE_MARKET_BRIEF_READY_TIME = "09:20"
 PRE_MARKET_BRIEF_EXPIRE_TIME = "09:30"
@@ -67,6 +76,8 @@ FLASH_PRUNE_INTERVAL_SECONDS = 6 * 60 * 60
 FLASH_ALERT_FRESHNESS_GRACE_SECONDS = 30
 FLASH_NOISE_PATTERNS = [re.compile(r"^金十图示[:：]"), re.compile(r"交易学院正在直播中")]
 FLASH_HIGH_IMPORTANCE_KEYWORDS = ["重组", "减持", "增持", "业绩预告", "业绩快报", "中标", "签署", "订单", "停牌", "复牌", "监管", "问询", "处罚", "回购"]
+MARKET_OVERVIEW_FLASH_KEYWORDS = ["港股收评", "每日投行/机构观点梳理", "A股每日市场要闻回顾", "A 股每日市场要闻回顾"]
+LEVEL_BUFFER = 0.005
 FLASH_DEFAULT_STATE = {
     "initialized": False,
     "lastSeenKey": None,
@@ -363,19 +374,205 @@ class App:
             message = "自选列表为空，已跳过收盘复盘。"
             self._record_review_result("skipped", message, attempted_at, today)
             return ("[SILENT] " if scheduled else "") + message
-        lines = ["🧭 收盘复盘总览", f"复盘数量: {len(rows)} 只"]
-        ok, failed = 0, []
+        entries: list[dict[str, Any]] = []
+        detail_messages: list[str] = []
+        market_overview = self._post_close_market_overview(today)
         for item in rows:
             try:
-                text = self.analyze(item["symbol"])
-                ok += 1
-                lines.append(f"• {item.get('name') or item['symbol']}（{item['symbol']}）: {_truncate(_first_nonempty_line(text), 160)}")
+                entry = self._post_close_review_item(item)
+                entries.append(entry)
+                detail_messages.append(entry["message"])
             except Exception as exc:
-                failed.append(f"{item['symbol']}: {exc}")
-        lines.extend([f"成功: {ok}", f"失败: {len(failed)}", *failed[:10]])
-        message = "\n".join(lines)
-        self._record_review_result("success" if ok > 0 else "failed", message, attempted_at, today)
+                message = _format_post_close_failure_message(item, str(exc), self._post_close_market_summary(item["symbol"]))
+                entries.append({"ok": False, "item": item, "error": str(exc), "message": message})
+                detail_messages.append(message)
+        overview = _format_post_close_overview(market_overview, entries)
+        message = "\n\n".join([overview, *detail_messages])
+        self._record_review_result("success" if any(entry.get("ok") for entry in entries) else "failed", message, attempted_at, today)
         return message
+
+    def _post_close_review_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        symbol = normalize_symbol(item["symbol"])
+        name = str(item.get("name") or symbol)
+        klines = self._latest_rows("klines_daily", symbol, "trade_date", 160)
+        if not klines:
+            klines = self.fetch_klines(symbol, 160)
+        if not klines:
+            raise RuntimeError("缺少日K数据，无法收盘复盘。")
+        trade_date = str(klines[-1].get("trade_date") or today_text())
+        validation = self._post_close_validation(symbol, trade_date)
+        composite_text = self.analyze(symbol)
+        level_row = next((row for row in self.store.rows("key_levels") if row.get("symbol") == symbol), None)
+        levels = _levels_from_row(level_row) or _extract_levels(composite_text) or _fallback_levels(safe_float(klines[-1].get("close"), 0.0) or 0.0, item.get("costPrice"))
+        market_summary = self._post_close_market_summary(symbol)
+        flash_context = self._post_close_flash_context(symbol, trade_date)
+        peer_context = self._post_close_peer_context(item)
+        review = self._post_close_review_decision(
+            item=item,
+            validation=validation,
+            composite_text=composite_text,
+            levels=levels,
+            market_summary=market_summary,
+            flash_context=flash_context,
+            peer_context=peer_context,
+        )
+        message = _format_post_close_detail_message(item, validation, review, market_summary, peer_context)
+        self._persist_post_close_review(symbol, message, review)
+        return {"ok": True, "item": item, "validation": validation, "review": review, "message": message}
+
+    def _persist_post_close_review(self, symbol: str, message: str, review: dict[str, Any]) -> None:
+        decision = str(review.get("decision") or "recompute")
+        levels = review.get("levels") if isinstance(review.get("levels"), dict) else None
+        if decision == "invalidate" or not levels:
+            try:
+                self.store.open("key_levels").delete(f"symbol = '{symbol}'")
+            except Exception:
+                pass
+            return
+        row = _level_row(symbol, message, levels)
+        self.store.replace_where("key_levels", f"symbol = '{symbol}'", [row])
+        self.store.replace_where(
+            "key_levels_history",
+            f"symbol = '{symbol}' AND analysis_date = '{today_text()}' AND profile = 'composite'",
+            [{**row, "activated_at": now_text(), "profile": "composite"}],
+        )
+
+    def _post_close_validation(self, symbol: str, trade_date: str) -> dict[str, Any]:
+        snapshots = [
+            row for row in self.store.rows("key_levels_history")
+            if row.get("symbol") == symbol and str(row.get("analysis_date") or "") < trade_date
+        ]
+        snapshots = sorted(snapshots, key=lambda row: str(row.get("analysis_date") or ""), reverse=True)
+        snapshot = snapshots[0] if snapshots else None
+        if not snapshot:
+            return {
+                "available": False,
+                "snapshotDate": None,
+                "evaluatedTradeDate": trade_date,
+                "verdict": "unavailable",
+                "snapshot": None,
+                "summary": "昨日无可验证的活动关键位快照，本轮只能基于今日数据直接重算。",
+                "lines": ["暂无昨日活动关键位快照。"],
+            }
+        daily_rows = sorted([row for row in self.store.rows("klines_daily") if row.get("symbol") == symbol], key=lambda row: str(row.get("trade_date") or ""))
+        row = next((item for item in daily_rows if item.get("trade_date") == trade_date), None)
+        if row is None:
+            row = next((item for item in daily_rows if str(item.get("trade_date") or "") > str(snapshot.get("analysis_date") or "")), None)
+        if row is None:
+            return {
+                "available": False,
+                "snapshotDate": snapshot.get("analysis_date"),
+                "evaluatedTradeDate": None,
+                "verdict": "unavailable",
+                "snapshot": snapshot,
+                "summary": f"已找到 {snapshot.get('analysis_date')} 的关键位快照，但尚无后续交易日数据可供验证。",
+                "lines": ["缺少后续交易日数据。"],
+            }
+        intraday_rows = [
+            item for item in self.store.rows("klines_intraday")
+            if item.get("symbol") == symbol and item.get("period") == "1m" and item.get("trade_date") == row.get("trade_date")
+        ]
+        support = _evaluate_support(snapshot, row)
+        resistance = _evaluate_resistance(snapshot, row)
+        stop_loss = _evaluate_stop_loss(snapshot, row)
+        take_profit = _evaluate_take_profit(snapshot, row)
+        breakthrough = _evaluate_breakthrough(snapshot, row)
+        path = _evaluate_path(snapshot, row, intraday_rows)
+        verdict = _derive_validation_verdict(support, stop_loss, take_profit, breakthrough, path)
+        lines = [
+            f"快照日期 {snapshot.get('analysis_date')}，验证交易日 {row.get('trade_date')}。",
+            f"当日K线: 高 {fmt_price(row.get('high'))} | 低 {fmt_price(row.get('low'))} | 收 {fmt_price(row.get('close'))}",
+            support,
+            resistance,
+            stop_loss,
+            take_profit,
+            breakthrough,
+            path,
+        ]
+        return {
+            "available": True,
+            "snapshotDate": snapshot.get("analysis_date"),
+            "evaluatedTradeDate": row.get("trade_date"),
+            "verdict": verdict,
+            "snapshot": snapshot,
+            "summary": f"昨日关键位{_validation_label(verdict)}。",
+            "lines": lines,
+        }
+
+    def _post_close_market_summary(self, symbol: str) -> dict[str, Any] | None:
+        klines = self._latest_rows("klines_daily", symbol, "trade_date", 5)
+        quote = None
+        try:
+            quote = (self.tickflow.quotes([symbol]) or [None])[0]
+        except Exception:
+            quote = None
+        latest = klines[-1] if klines else {}
+        latest_close = safe_float(latest.get("close")) or safe_float((quote or {}).get("last_price"))
+        change_pct = None
+        if latest:
+            prev_close = safe_float(latest.get("prev_close"))
+            close = safe_float(latest.get("close"))
+            if prev_close and close is not None:
+                change_pct = (close - prev_close) / abs(prev_close) * 100
+        if change_pct is None and quote:
+            ext = quote.get("ext") if isinstance(quote.get("ext"), dict) else {}
+            change_pct = safe_float(quote.get("change_pct") or ext.get("change_pct"))
+        return {"latestClose": latest_close, "dailyChangePct": change_pct} if latest_close is not None or change_pct is not None else None
+
+    def _post_close_market_overview(self, date_prefix: str) -> str | None:
+        rows = [
+            row for row in self.store.rows("jin10_flash")
+            if str(row.get("published_at") or "").startswith(date_prefix)
+            and any(keyword in str(row.get("content") or "") for keyword in MARKET_OVERVIEW_FLASH_KEYWORDS)
+        ]
+        rows = sorted(rows, key=lambda row: str(row.get("published_at") or ""), reverse=True)
+        if not rows:
+            return None
+        return "\n".join(f"• [{str(row.get('published_at') or '')[11:16]}] {_truncate(str(row.get('content') or ''), 120)}" for row in rows[:3])
+
+    def _post_close_flash_context(self, symbol: str, date_prefix: str) -> dict[str, list[dict[str, Any]]]:
+        deliveries = [
+            row for row in self.store.rows("jin10_flash_delivery")
+            if str(row.get("published_at") or "").startswith(date_prefix)
+            and symbol in str(row.get("symbols_json") or "")
+        ]
+        overview = [
+            row for row in self.store.rows("jin10_flash")
+            if str(row.get("published_at") or "").startswith(date_prefix)
+            and any(keyword in str(row.get("content") or "") for keyword in MARKET_OVERVIEW_FLASH_KEYWORDS)
+        ]
+        deliveries = sorted(deliveries, key=lambda row: str(row.get("published_at") or ""), reverse=True)[:5]
+        overview = sorted(overview, key=lambda row: str(row.get("published_at") or ""), reverse=True)[:5]
+        return {"stockAlerts": deliveries, "marketOverviewFlashes": overview}
+
+    def _post_close_peer_context(self, item: dict[str, Any]) -> dict[str, Any]:
+        sector = _clean_profile_text(item.get("sector"))
+        if not sector:
+            return {"available": False, "summary": "未记录申万行业分类。"}
+        return {"available": False, "summary": f"行业: {sector}。Hermes Python 版暂未启用同业涨跌排名。"}
+
+    def _post_close_review_decision(
+        self,
+        *,
+        item: dict[str, Any],
+        validation: dict[str, Any],
+        composite_text: str,
+        levels: dict[str, Any],
+        market_summary: dict[str, Any] | None,
+        flash_context: dict[str, list[dict[str, Any]]],
+        peer_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        fallback = _fallback_post_close_review(validation, composite_text, levels, market_summary, flash_context, peer_context)
+        if self.config.llm_base_url and self.config.llm_api_key and self.config.llm_model:
+            try:
+                prompt = _build_post_close_review_prompt(item, validation, composite_text, levels, market_summary, flash_context, peer_context)
+                text = call_llm(self.config, POST_CLOSE_REVIEW_SYSTEM, prompt, max_tokens=1800, temperature=0.2)
+                parsed = _extract_json_object(text or "")
+                if parsed:
+                    return _normalize_post_close_review(parsed, fallback)
+            except Exception:
+                pass
+        return fallback
 
     def analyze(self, symbol: str) -> str:
         symbol = normalize_symbol(symbol)
@@ -1511,6 +1708,223 @@ def _level_row(symbol: str, text: str, levels: dict[str, Any]) -> dict[str, Any]
     return {"symbol": symbol, "analysis_date": today_text(), "current_price": safe_float(levels.get("current_price"), 0) or 0, "stop_loss": safe_float(levels.get("stop_loss")), "breakthrough": safe_float(levels.get("breakthrough")), "support": safe_float(levels.get("support")), "cost_level": safe_float(levels.get("cost_level")), "resistance": safe_float(levels.get("resistance")), "take_profit": safe_float(levels.get("take_profit")), "gap": safe_float(levels.get("gap")), "target": safe_float(levels.get("target")), "round_number": safe_float(levels.get("round_number")), "analysis_text": text, "score": safe_int(levels.get("score"), 50) or 50}
 
 
+def _levels_from_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+    return {field: row.get(field) for field in ["current_price", "stop_loss", "breakthrough", "support", "cost_level", "resistance", "take_profit", "gap", "target", "round_number", "score"]}
+
+
+def _build_post_close_review_prompt(item: dict[str, Any], validation: dict[str, Any], composite_text: str, levels: dict[str, Any], market_summary: dict[str, Any] | None, flash_context: dict[str, list[dict[str, Any]]], peer_context: dict[str, Any]) -> str:
+    payload = {
+        "symbol": item.get("symbol"),
+        "name": item.get("name"),
+        "costPrice": item.get("costPrice"),
+        "sector": _clean_profile_text(item.get("sector")),
+        "themes": _normalize_theme_labels(item.get("themes"), company_name=item.get("name")),
+        "marketSummary": market_summary,
+        "validation": {k: validation.get(k) for k in ["summary", "lines", "verdict", "snapshotDate", "evaluatedTradeDate"]},
+        "currentCompositeLevels": levels,
+        "compositeAnalysis": _truncate(composite_text, 1800),
+        "flashContext": {
+            "stockAlerts": [_flash_review_line(row) for row in flash_context.get("stockAlerts", [])[:5]],
+            "marketOverview": [_flash_review_line(row) for row in flash_context.get("marketOverviewFlashes", [])[:5]],
+        },
+        "peerContext": peer_context,
+    }
+    return "请基于以下 JSON 生成收盘复盘，并按系统要求输出正文和最终 JSON。\n" + json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _normalize_post_close_review(parsed: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+    decision = str(parsed.get("decision") or fallback["decision"]).strip()
+    if decision not in {"keep", "adjust", "recompute", "invalidate"}:
+        decision = fallback["decision"]
+    levels = parsed.get("levels") if isinstance(parsed.get("levels"), dict) else None
+    if decision != "invalidate" and not levels:
+        levels = fallback["levels"]
+    normalized = {
+        "sessionSummary": str(parsed.get("session_summary") or parsed.get("sessionSummary") or fallback["sessionSummary"]),
+        "marketSectorSummary": str(parsed.get("market_sector_summary") or parsed.get("marketSectorSummary") or fallback["marketSectorSummary"]),
+        "newsSummary": str(parsed.get("news_summary") or parsed.get("newsSummary") or fallback["newsSummary"]),
+        "decision": decision,
+        "decisionReason": str(parsed.get("decision_reason") or parsed.get("decisionReason") or fallback["decisionReason"]),
+        "actionAdvice": str(parsed.get("action_advice") or parsed.get("actionAdvice") or fallback["actionAdvice"]),
+        "marketBias": _normalize_choice(parsed.get("market_bias") or parsed.get("marketBias"), {"tailwind", "neutral", "headwind"}, fallback["marketBias"]),
+        "sectorBias": _normalize_choice(parsed.get("sector_bias") or parsed.get("sectorBias"), {"tailwind", "neutral", "headwind"}, fallback["sectorBias"]),
+        "newsImpact": _normalize_choice(parsed.get("news_impact") or parsed.get("newsImpact"), {"supportive", "neutral", "disruptive"}, fallback["newsImpact"]),
+        "levels": _normalize_review_levels(levels, fallback["levels"]),
+    }
+    if normalized["decision"] == "invalidate":
+        normalized["levels"] = None
+    return normalized
+
+
+def _normalize_choice(value: Any, allowed: set[str], fallback: str) -> str:
+    text = str(value or "").strip()
+    return text if text in allowed else fallback
+
+
+def _normalize_review_levels(levels: Any, fallback: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(levels, dict):
+        return fallback
+    base = dict(fallback or {})
+    for field in ["current_price", "stop_loss", "breakthrough", "support", "cost_level", "resistance", "take_profit", "gap", "target", "round_number"]:
+        if field in levels:
+            base[field] = safe_float(levels.get(field))
+    if "score" in levels:
+        base["score"] = safe_int(levels.get("score"), safe_int(base.get("score"), 50) or 50)
+    return base
+
+
+def _fallback_post_close_review(validation: dict[str, Any], composite_text: str, levels: dict[str, Any], market_summary: dict[str, Any] | None, flash_context: dict[str, list[dict[str, Any]]], peer_context: dict[str, Any]) -> dict[str, Any]:
+    verdict = str(validation.get("verdict") or "unavailable")
+    change_pct = safe_float((market_summary or {}).get("dailyChangePct"))
+    decision = "recompute" if verdict in {"invalidated", "unavailable"} else ("keep" if verdict == "validated" else "adjust")
+    market_bias = "tailwind" if change_pct is not None and change_pct >= 1 else ("headwind" if change_pct is not None and change_pct <= -1 else "neutral")
+    stock_alerts = flash_context.get("stockAlerts", [])
+    overview = flash_context.get("marketOverviewFlashes", [])
+    news_impact = "supportive" if stock_alerts else ("neutral" if overview else "neutral")
+    return {
+        "sessionSummary": _truncate(_first_nonempty_line(composite_text), 180) or "已完成收盘后综合分析，明日继续按关键位和量价反馈执行。",
+        "marketSectorSummary": (peer_context.get("summary") if isinstance(peer_context, dict) else None) or "大盘与板块信息有限，本轮以个股量价结构和关键位验证为主。",
+        "newsSummary": _format_flash_review_summary(flash_context),
+        "decision": decision,
+        "decisionReason": f"昨日关键位{_validation_label(verdict)}，结合今日收盘结构，明日处理建议为{_decision_label(decision)}。",
+        "actionAdvice": "明日优先观察开盘量能、是否守住支撑，以及突破位附近的收盘确认；不追高，不把自动分析作为单一交易依据。",
+        "marketBias": market_bias,
+        "sectorBias": "neutral",
+        "newsImpact": news_impact,
+        "levels": dict(levels),
+    }
+
+
+def _format_post_close_overview(market_overview: str | None, entries: list[dict[str, Any]]) -> str:
+    success = [entry for entry in entries if entry.get("ok")]
+    failures = len(entries) - len(success)
+    validation_counts = _count_by(str(entry.get("validation", {}).get("verdict") or "unavailable") for entry in success)
+    decision_counts = _count_by(str(entry.get("review", {}).get("decision") or "recompute") for entry in success)
+    market_counts = _count_by(str(entry.get("review", {}).get("marketBias") or "neutral") for entry in success)
+    sector_counts = _count_by(str(entry.get("review", {}).get("sectorBias") or "neutral") for entry in success)
+    news_counts = _count_by(str(entry.get("review", {}).get("newsImpact") or "neutral") for entry in success)
+    lines = [
+        "**🧭 收盘复盘总览**",
+        "",
+        "**【🌐 市场总览】**",
+        market_overview or "未获取到大盘总览，本轮仅输出个股复盘。",
+        "",
+        "**【📊 本轮统计】**",
+        "",
+        f"复盘数量: {len(entries)} 只 | 成功 {len(success)} | 失败 {failures}",
+        f"关键位验证: 有效 {validation_counts.get('validated', 0)} | 混合 {validation_counts.get('mixed', 0)} | 失效 {validation_counts.get('invalidated', 0)} | 缺样本 {validation_counts.get('unavailable', 0)}",
+        f"明日处理: 沿用 {decision_counts.get('keep', 0)} | 微调 {decision_counts.get('adjust', 0)} | 重算 {decision_counts.get('recompute', 0)} | 暂停 {decision_counts.get('invalidate', 0)}",
+        f"大盘风向: 顺风 {market_counts.get('tailwind', 0)} | 中性 {market_counts.get('neutral', 0)} | 逆风 {market_counts.get('headwind', 0)}",
+        f"板块风向: 顺风 {sector_counts.get('tailwind', 0)} | 中性 {sector_counts.get('neutral', 0)} | 逆风 {sector_counts.get('headwind', 0)}",
+        f"新闻影响: 支持 {news_counts.get('supportive', 0)} | 中性 {news_counts.get('neutral', 0)} | 扰动 {news_counts.get('disruptive', 0)}",
+    ]
+    return "\n".join(lines).strip()
+
+
+def _format_post_close_detail_message(item: dict[str, Any], validation: dict[str, Any], review: dict[str, Any], market_summary: dict[str, Any] | None, peer_context: dict[str, Any]) -> str:
+    levels = review.get("levels") if isinstance(review.get("levels"), dict) else None
+    meta = _format_review_market_meta(item, market_summary)
+    industry = _format_industry_position(peer_context)
+    lines = [
+        f"**📘 收盘复盘｜{item.get('name') or item.get('symbol')}（{item.get('symbol')}）**",
+        f"{_validation_badge(validation.get('verdict'))} 昨日验证：{_validation_label(validation.get('verdict'))} | {_decision_badge(review.get('decision'))} 明日处理：{_decision_label(review.get('decision'))}",
+    ]
+    if meta:
+        lines.append(meta)
+    lines.extend([
+        "",
+        "**【📍 昨日关键位验证】**",
+        f"• 结论：{validation.get('summary') or '暂无验证结论。'}",
+        *[f"• {line}" for line in (validation.get("lines") or [])],
+        "",
+        "**【🧭 今日盘面】**",
+        str(review.get("sessionSummary") or "未生成盘面一句话总结。"),
+        "",
+        "**【🌐 大盘与板块】**",
+        " | ".join([part for part in [
+            f"• 风向：大盘 {_market_badge(review.get('marketBias'))}{_market_label(review.get('marketBias'))}",
+            f"板块 {_market_badge(review.get('sectorBias'))}{_market_label(review.get('sectorBias'))}",
+            f"同业 {industry}" if industry else None,
+        ] if part]),
+        str(review.get("marketSectorSummary") or "未生成大盘/板块总结。"),
+        "",
+        "**【📰 新闻与公告】**",
+        f"• 影响：{_news_badge(review.get('newsImpact'))}{_news_label(review.get('newsImpact'))}",
+        str(review.get("newsSummary") or "未生成新闻影响总结。"),
+        "",
+        "**【🛠️ 明日关键位处理】**",
+        f"• 结论：{_decision_badge(review.get('decision'))}{_decision_label(review.get('decision'))}",
+        str(review.get("decisionReason") or "未生成处理理由。"),
+        "",
+        "**【🎯 更新后关键位】**",
+    ])
+    if str(review.get("decision")) == "invalidate" or not levels:
+        lines.extend(["• 已暂停沿用昨日关键位，等待下一轮重算。", "", "**【✅ 操作建议】**", str(review.get("actionAdvice") or "明日先观察，等待新的关键位再执行。")])
+        return "\n".join(lines)
+    rail = _format_price_rail(levels)
+    score = safe_int(levels.get("score"), 50) or 50
+    score_suffix = "/10" if score <= 10 else "/100"
+    lines.extend([
+        f"• 支撑 {fmt_price(levels.get('support'))} | 压力 {fmt_price(levels.get('resistance'))} | 突破 {fmt_price(levels.get('breakthrough'))}",
+        f"• 止损 {fmt_price(levels.get('stop_loss'))} | 止盈 {fmt_price(levels.get('take_profit'))} | 评分 {score}{score_suffix}",
+        *([f"• 价位框架：{rail}"] if rail else []),
+        "",
+        "**【✅ 操作建议】**",
+        str(review.get("actionAdvice") or "按关键位和次日量价配合再决定是否执行。"),
+    ])
+    return "\n".join(lines)
+
+
+def _format_post_close_failure_message(item: dict[str, Any], error_message: str, market_summary: dict[str, Any] | None = None) -> str:
+    meta = _format_review_market_meta(item, market_summary)
+    lines = [f"**⚠️ 收盘复盘｜{item.get('name') or item.get('symbol')}（{item.get('symbol')}）**"]
+    if meta:
+        lines.extend(["", meta])
+    lines.extend(["", "**【❌ 失败原因】**", error_message, "", "**【🧷 保底处理】**", "本轮未生成可用关键位，请稍后重新执行 `/ta_postclosereview` 或 `/ta_analyze`。"])
+    return "\n".join(lines)
+
+
+def _format_review_market_meta(item: dict[str, Any], market_summary: dict[str, Any] | None) -> str | None:
+    parts: list[str] = []
+    latest_close = safe_float((market_summary or {}).get("latestClose"))
+    change_pct = safe_float((market_summary or {}).get("dailyChangePct"))
+    cost = safe_float(item.get("costPrice"))
+    if latest_close is not None:
+        parts.append(f"• 收盘 {latest_close:.2f}")
+    if change_pct is not None:
+        parts.append(f"当日 {change_pct:+.2f}%")
+    if cost and cost > 0:
+        parts.append(f"成本 {cost:.2f}")
+    return " | ".join(parts) if parts else None
+
+
+def _format_price_rail(levels: dict[str, Any]) -> str | None:
+    markers = [
+        ("⛔止损", levels.get("stop_loss")),
+        ("🛡️支撑", levels.get("support")),
+        ("💹现价", levels.get("current_price")),
+        ("🚧压力", levels.get("resistance")),
+        ("🚀突破", levels.get("breakthrough")),
+        ("🎯止盈", levels.get("take_profit")),
+    ]
+    merged: dict[str, list[str]] = {}
+    values: dict[str, float] = {}
+    for label, value in markers:
+        parsed = safe_float(value)
+        if parsed is None or parsed <= 0:
+            continue
+        key = f"{parsed:.2f}"
+        values[key] = parsed
+        merged.setdefault(key, [])
+        if label not in merged[key]:
+            merged[key].append(label)
+    if len(merged) < 2:
+        return None
+    return " → ".join(f"{'/'.join(merged[key])} {key}" for key in sorted(merged, key=lambda item: values[item]))
+
+
 def _build_theme_query(company_name: str, symbol: str) -> str:
     return f"{company_name} {symbol} 所属行业 板块 题材 概念"
 
@@ -1725,6 +2139,173 @@ def _append_unique(mapping: dict[str, list[str]], key: str, value: str) -> None:
     existing = mapping.setdefault(key, [])
     if value not in existing:
         existing.append(value)
+
+
+def _evaluate_support(snapshot: dict[str, Any], row: dict[str, Any]) -> str:
+    support = safe_float(snapshot.get("support"))
+    low = safe_float(row.get("low"), 0.0) or 0.0
+    close = safe_float(row.get("close"), 0.0) or 0.0
+    if not support or support <= 0:
+        return "支撑: 昨日未设置支撑位。"
+    if low > support * (1 + LEVEL_BUFFER):
+        return f"支撑 {support:.2f}: 当日未触达。"
+    if close < support * (1 - LEVEL_BUFFER):
+        return f"支撑 {support:.2f}: 盘中触达后收盘失守，验证失败。"
+    return f"支撑 {support:.2f}: 盘中触达后收盘仍守住，验证有效。"
+
+
+def _evaluate_resistance(snapshot: dict[str, Any], row: dict[str, Any]) -> str:
+    resistance = safe_float(snapshot.get("resistance"))
+    high = safe_float(row.get("high"), 0.0) or 0.0
+    close = safe_float(row.get("close"), 0.0) or 0.0
+    if not resistance or resistance <= 0:
+        return "压力: 昨日未设置压力位。"
+    if high < resistance * (1 - LEVEL_BUFFER):
+        return f"压力 {resistance:.2f}: 当日未触达。"
+    if close > resistance * (1 + LEVEL_BUFFER):
+        return f"压力 {resistance:.2f}: 当日已被有效站上，原压力失效。"
+    return f"压力 {resistance:.2f}: 盘中触达但未有效站上，压制仍在。"
+
+
+def _evaluate_stop_loss(snapshot: dict[str, Any], row: dict[str, Any]) -> str:
+    stop_loss = safe_float(snapshot.get("stop_loss"))
+    low = safe_float(row.get("low"), 0.0) or 0.0
+    if not stop_loss or stop_loss <= 0:
+        return "止损: 昨日未设置止损位。"
+    return f"止损 {stop_loss:.2f}: {'已触发' if low <= stop_loss else '未触发'}。"
+
+
+def _evaluate_take_profit(snapshot: dict[str, Any], row: dict[str, Any]) -> str:
+    take_profit = safe_float(snapshot.get("take_profit"))
+    high = safe_float(row.get("high"), 0.0) or 0.0
+    if not take_profit or take_profit <= 0:
+        return "止盈: 昨日未设置止盈位。"
+    return f"止盈 {take_profit:.2f}: {'已触发' if high >= take_profit else '未触发'}。"
+
+
+def _evaluate_breakthrough(snapshot: dict[str, Any], row: dict[str, Any]) -> str:
+    breakthrough = safe_float(snapshot.get("breakthrough"))
+    high = safe_float(row.get("high"), 0.0) or 0.0
+    close = safe_float(row.get("close"), 0.0) or 0.0
+    if not breakthrough or breakthrough <= 0:
+        return "突破: 昨日未设置突破位。"
+    if high < breakthrough:
+        return f"突破 {breakthrough:.2f}: 未触发。"
+    if close >= breakthrough * (1 + LEVEL_BUFFER):
+        return f"突破 {breakthrough:.2f}: 已触发且收盘确认。"
+    return f"突破 {breakthrough:.2f}: 盘中试探但收盘未确认。"
+
+
+def _evaluate_path(snapshot: dict[str, Any], row: dict[str, Any], intraday_rows: list[dict[str, Any]]) -> str:
+    stop_loss = safe_float(snapshot.get("stop_loss"))
+    take_profit = safe_float(snapshot.get("take_profit"))
+    if not stop_loss or not take_profit or stop_loss <= 0 or take_profit <= 0:
+        return "路径: 缺少双目标，无法判断先止损还是先止盈。"
+    hits_stop = (safe_float(row.get("low"), 0.0) or 0.0) <= stop_loss
+    hits_take_profit = (safe_float(row.get("high"), 0.0) or 0.0) >= take_profit
+    if not hits_stop and not hits_take_profit:
+        return "路径: 当日未触发双目标。"
+    if hits_stop and not hits_take_profit:
+        return f"路径: 当日先到止损 {stop_loss:.2f}。"
+    if not hits_stop and hits_take_profit:
+        return f"路径: 当日先到止盈 {take_profit:.2f}。"
+    for item in sorted(intraday_rows, key=lambda data: str(data.get("trade_time") or "")):
+        intraday_hits_stop = (safe_float(item.get("low"), 0.0) or 0.0) <= stop_loss
+        intraday_hits_take_profit = (safe_float(item.get("high"), 0.0) or 0.0) >= take_profit
+        if not intraday_hits_stop and not intraday_hits_take_profit:
+            continue
+        if intraday_hits_stop and not intraday_hits_take_profit:
+            return f"路径: 同日双触发中，分钟线判定先到止损 {stop_loss:.2f}。"
+        if not intraday_hits_stop and intraday_hits_take_profit:
+            return f"路径: 同日双触发中，分钟线判定先到止盈 {take_profit:.2f}。"
+        open_price = safe_float(item.get("open"))
+        if open_price is not None and open_price <= stop_loss:
+            return f"路径: 同日双触发中，分钟线按开盘位置判定先到止损 {stop_loss:.2f}。"
+        if open_price is not None and open_price >= take_profit:
+            return f"路径: 同日双触发中，分钟线按开盘位置判定先到止盈 {take_profit:.2f}。"
+        return "路径: 同日双触发，但分钟线仍无法明确先后。"
+    return "路径: 同日双触发，但缺少有效分钟线判定先后。"
+
+
+def _derive_validation_verdict(support: str, stop_loss: str, take_profit: str, breakthrough: str, path: str) -> str:
+    if "验证失败" in support or "已触发" in stop_loss or "先到止损" in path:
+        return "invalidated"
+    if "已触发" in take_profit or "收盘确认" in breakthrough or "验证有效" in support or "先到止盈" in path:
+        return "validated"
+    return "mixed"
+
+
+def _validation_label(value: Any) -> str:
+    return {"validated": "验证有效", "invalidated": "明显失效", "mixed": "效果偏混合", "unavailable": "暂无可验证样本"}.get(str(value or "unavailable"), "暂无可验证样本")
+
+
+def _validation_badge(value: Any) -> str:
+    return {"validated": "🟩", "invalidated": "🟥", "mixed": "🟨", "unavailable": "⬜"}.get(str(value or "unavailable"), "⬜")
+
+
+def _decision_label(value: Any) -> str:
+    return {"keep": "沿用", "adjust": "微调", "recompute": "重算", "invalidate": "暂停沿用"}.get(str(value or "recompute"), "重算")
+
+
+def _decision_badge(value: Any) -> str:
+    return {"keep": "🟩", "adjust": "🟨", "recompute": "🟥", "invalidate": "⬛"}.get(str(value or "recompute"), "🟥")
+
+
+def _market_label(value: Any) -> str:
+    return {"tailwind": "顺风", "neutral": "中性", "headwind": "逆风"}.get(str(value or "neutral"), "中性")
+
+
+def _market_badge(value: Any) -> str:
+    return {"tailwind": "🟩", "neutral": "🟨", "headwind": "🟥"}.get(str(value or "neutral"), "🟨")
+
+
+def _news_label(value: Any) -> str:
+    return {"supportive": "支持", "neutral": "中性", "disruptive": "扰动"}.get(str(value or "neutral"), "中性")
+
+
+def _news_badge(value: Any) -> str:
+    return {"supportive": "🟩", "neutral": "🟨", "disruptive": "🟥"}.get(str(value or "neutral"), "🟨")
+
+
+def _count_by(values: Iterable[str]) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for value in values:
+        result[value] = result.get(value, 0) + 1
+    return result
+
+
+def _flash_review_line(row: dict[str, Any]) -> str:
+    published_at = str(row.get("published_at") or "")
+    headline = str(row.get("headline") or "").strip()
+    content = str(row.get("reason") or row.get("content") or row.get("message") or "").strip()
+    prefix = f"[{published_at[11:16]}] " if len(published_at) >= 16 else ""
+    body = f"{headline}: {content}" if headline and headline not in content else content
+    return prefix + _truncate(body, 220)
+
+
+def _format_flash_review_summary(flash_context: dict[str, list[dict[str, Any]]]) -> str:
+    stock_alerts = [_flash_review_line(row) for row in flash_context.get("stockAlerts", [])[:3]]
+    overview = [_flash_review_line(row) for row in flash_context.get("marketOverviewFlashes", [])[:2]]
+    if not stock_alerts and not overview:
+        return "今日未匹配到显著个股快讯或市场概览快讯，新闻未构成主要解释。"
+    parts = []
+    if stock_alerts:
+        parts.append("个股相关: " + "；".join(stock_alerts))
+    if overview:
+        parts.append("市场概览: " + "；".join(overview))
+    return "\n".join(parts)
+
+
+def _format_industry_position(context: dict[str, Any] | None) -> str | None:
+    if not context:
+        return None
+    if not context.get("available"):
+        return _clean_profile_text(context.get("summary"))
+    rank = safe_int(context.get("targetRank"))
+    count = safe_int(context.get("peerCount"))
+    if not rank or not count:
+        return _clean_profile_text(context.get("summary"))
+    return f"同业位置 {rank}/{count}"
 
 
 def _flash_page_items(page: Any) -> list[dict[str, Any]]:

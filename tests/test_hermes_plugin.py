@@ -589,6 +589,94 @@ def test_daily_update_review_retries_after_waiting_for_daily_update():
         core_module.today_text = previous_today_text
 
 
+def test_post_close_review_formats_detail_and_persists_review_snapshot():
+    class MemoryTable:
+        def __init__(self, store, name):
+            self.store = store
+            self.name = name
+
+        def delete(self, predicate):
+            if "symbol = '002558.SZ'" in predicate:
+                self.store.tables[self.name] = [row for row in self.store.tables.get(self.name, []) if row.get("symbol") != "002558.SZ"]
+
+    class MemoryStore:
+        def __init__(self):
+            self.tables = {
+                "watchlist": [{"symbol": "002558.SZ", "name": "巨人网络", "costPrice": 32.79, "addedAt": "2026-05-06 09:30:00", "sector": "传媒", "themes": "游戏"}],
+                "klines_daily": [
+                    {"symbol": "002558.SZ", "trade_date": "2026-05-05", "timestamp": 1, "open": 10.0, "high": 10.8, "low": 9.9, "close": 10.5, "volume": 1, "amount": 1, "prev_close": 10.1},
+                    {"symbol": "002558.SZ", "trade_date": "2026-05-06", "timestamp": 2, "open": 10.6, "high": 11.1, "low": 10.2, "close": 10.8, "volume": 1, "amount": 1, "prev_close": 10.5},
+                ],
+                "klines_intraday": [],
+                "key_levels": [],
+                "key_levels_history": [
+                    {"symbol": "002558.SZ", "analysis_date": "2026-05-05", "activated_at": "2026-05-05 20:00:00", "profile": "composite", "current_price": 10.5, "stop_loss": 9.5, "breakthrough": 11.0, "support": 10.0, "cost_level": 32.79, "resistance": 10.9, "take_profit": 11.8, "gap": None, "target": 11.8, "round_number": 10.0, "analysis_text": "昨日关键位", "score": 60},
+                ],
+                "jin10_flash_delivery": [
+                    {"flash_key": "flash-1", "published_at": "2026-05-06 18:00:00", "symbols_json": "[\"002558.SZ\"]", "headline": "巨人网络公告", "reason": "巨人网络发布新品进展。", "importance": "medium", "message": "msg", "delivered_at": "2026-05-06 18:01:00"},
+                ],
+                "jin10_flash": [
+                    {"flash_key": "flash-2", "published_at": "2026-05-06 17:00:00", "published_ts": 1, "content": "金十数据整理：A股每日市场要闻回顾 测试内容", "url": "", "ingested_at": "2026-05-06 17:01:00", "raw_json": "{}"},
+                ],
+            }
+
+        def rows(self, name):
+            return [dict(row) for row in self.tables.get(name, [])]
+
+        def add(self, name, rows):
+            self.tables.setdefault(name, []).extend(dict(row) for row in rows)
+
+        def replace_where(self, name, predicate, rows):
+            symbol = "002558.SZ" if "002558.SZ" in predicate else None
+            existing = self.tables.setdefault(name, [])
+            if symbol:
+                existing = [row for row in existing if row.get("symbol") != symbol]
+            self.tables[name] = existing + [dict(row) for row in rows]
+
+        def open(self, name):
+            return MemoryTable(self, name)
+
+    class FakeTickFlow:
+        def quotes(self, symbols):
+            return []
+
+    fixed_now = datetime(2026, 5, 6, 20, 5, 0, tzinfo=timezone(timedelta(hours=8)))
+    previous_now_cn = core_module.now_cn
+    previous_now_text = core_module.now_text
+    previous_today_text = core_module.today_text
+    core_module.now_cn = lambda: fixed_now
+    core_module.now_text = lambda: "2026-05-06 20:05:00"
+    core_module.today_text = lambda: "2026-05-06"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStore()
+            app = App(Config(database_path=tmp, llm_api_key="", daily_update_notify=False))
+            app.store = store
+            app.tickflow = FakeTickFlow()
+
+            def fake_analyze(symbol):
+                levels = {"current_price": 10.8, "stop_loss": 9.8, "breakthrough": 11.2, "support": 10.3, "cost_level": 32.79, "resistance": 11.0, "take_profit": 12.0, "gap": None, "target": 12.0, "round_number": 11.0, "score": 65}
+                store.replace_where("key_levels", f"symbol = '{symbol}'", [{**levels, "symbol": symbol, "analysis_date": "2026-05-06", "analysis_text": "### 核心摘要\n测试分析"}])
+                return "### 核心摘要\n测试分析"
+
+            app.analyze = fake_analyze
+            text = app.post_close_review()
+
+        assert "**🧭 收盘复盘总览**" in text
+        assert "**📘 收盘复盘｜巨人网络（002558.SZ）**" in text
+        assert "**【📍 昨日关键位验证】**" in text
+        assert "突破 11.00" in text
+        assert "**【🛠️ 明日关键位处理】**" in text
+        assert "价位框架" in text
+        assert "巨人网络公告" in text
+        assert store.tables["key_levels"][0]["analysis_text"].startswith("**📘 收盘复盘")
+        assert any(row.get("analysis_date") == "2026-05-06" and row.get("profile") == "composite" for row in store.tables["key_levels_history"])
+    finally:
+        core_module.now_cn = previous_now_cn
+        core_module.now_text = previous_now_text
+        core_module.today_text = previous_today_text
+
+
 def test_daily_update_status_recovers_stale_running_state():
     with tempfile.TemporaryDirectory() as tmp:
         app = App(Config(database_path=tmp))
