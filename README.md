@@ -13,12 +13,14 @@
 兼容性要求：
 
 - Hermes Agent 已安装并能加载本地 Python 插件
-- Python `>=3.11`
+- Python `>=3.10`
 - 建议通过本项目的一键安装脚本创建虚拟环境并安装依赖
 
 ## 🧭 项目简介
 
 TickFlow Assist Hermes 面向一条完整的“自选管理 -> 数据抓取 -> 综合分析 -> 后台监控 -> 结果留痕”链路，适合在 Hermes 中做 A 股日常盯盘、收盘后复盘和分析结果沉淀。
+
+本插件的 OpenClaw 版，详见 [tickflow-assist](https://github.com/robinspt/tickflow-assist)。
 
 ## ✨ 核心特性
 
@@ -228,48 +230,6 @@ tickflow-assist-hermes/
 - Python 依赖：`lancedb`、`pyarrow`、`pandas`、`numpy`、`requests`、`Pillow` 等由安装脚本安装到虚拟环境。
 - [金十数据 MCP](https://mcp.jin10.com/app/)：可选，用于 24 小时快讯流接入、自选关联筛选与事件驱动告警。
 - [东方财富妙想 Skills](https://marketing.dfcfs.com/views/finskillshub/)：可选，用于 `mx_search`、`mx_data`、`mx_select_stock`、东方财富自选同步，以及非 Expert 财务链路的 lite 补充；自选管理接口每日额度 200 次。
-
-## 🗃 数据库
-
-数据库路径默认是 `./data/lancedb`。Python 版通过 `lancedb` 和 `pyarrow` 直接读写 LanceDB 表：
-
-- `watchlist`
-- `klines_daily`
-- `klines_intraday`
-- `indicators`
-- `key_levels`
-- `key_levels_history`
-- `analysis_log`
-- `technical_analysis`
-- `financial_analysis`
-- `news_analysis`
-- `composite_analysis`
-- `alert_log`
-- `jin10_flash`
-- `jin10_flash_delivery`
-- `universes`
-- `universe_memberships`
-
-## ✅ 验证
-
-```bash
-python3 -m compileall __init__.py configure_tickflow.py hermes_bootstrap.py schemas.py tools.py tickflow_assist tests
-TICKFLOW_ASSIST_DISABLE_AUTOSTART=1 python3 -B - <<'PY'
-import importlib.util
-spec = importlib.util.spec_from_file_location('test_hermes_plugin','tests/test_hermes_plugin.py')
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
-for name in sorted(n for n in dir(mod) if n.startswith('test_')):
-    getattr(mod, name)()
-print('ok')
-PY
-```
-
-如果安装了 pytest，也可以运行：
-
-```bash
-python3 -m pytest
-```
 
 ## ⚠️ 风险提示
 
