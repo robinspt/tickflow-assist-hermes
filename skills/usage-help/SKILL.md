@@ -31,4 +31,6 @@ metadata:
 - `/ta_analyze 002261`
 - `/ta_watchlist`
 - `/ta_monitorstatus`
+- `/ta_premarketbrief`
+- `/ta_postclosereview`
 - `/ta_testalert`

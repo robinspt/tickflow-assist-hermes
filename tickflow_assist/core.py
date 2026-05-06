@@ -12,7 +12,7 @@ from .alert_media import AlertCardInput, remove_alert_media, write_alert_card
 from .clients import Jin10Client, MxClient, TickFlowClient, call_llm
 from .config import Config, load_config, supports_financial, supports_intraday
 from .storage import LanceStore, SCHEMAS, json_text
-from .utils import fmt_price, hash_key, is_trading_time, normalize_symbol, now_text, pct, safe_float, safe_int, symbol_code, today_text
+from .utils import fmt_price, hash_key, is_trading_time, normalize_symbol, now_cn, now_text, pct, safe_float, safe_int, symbol_code, today_text
 
 
 ANALYSIS_SYSTEM = """你是一位A股综合分析师。基于提供的日K、技术指标、实时行情、财务和资讯材料，输出中文分析。
@@ -40,6 +40,20 @@ WATCHLIST_PROFILE_EXTRACTION_SYSTEM = """你是A股证券资料结构化抽取�
 8. 若资料仅出现业务描述而没有足够证据支持概念标签，不要强行扩写。
 9. confidence 仅反映你对提取结果的把握，不要附加解释。"""
 
+PRE_MARKET_BRIEF_SYSTEM = """你是一位A股开盘前资讯简报编辑。基于金十数据整理快讯、自选股行业/题材和命中信息，生成适合开盘前阅读的中文简报。
+要求：
+1. 先给 3-5 条重大要闻，再给自选相关、潜在机会、风险提示、开盘前关注清单。
+2. 不编造未提供的股票、板块、政策或数据。
+3. 重点写清楚这些消息可能如何影响风险偏好、题材扩散和自选股观察点。
+4. 输出可直接投递到 Telegram/Discord 的纯文本。"""
+
+PRE_MARKET_BRIEF_KEYWORD = "金十数据整理"
+PRE_MARKET_BRIEF_READY_TIME = "09:20"
+DAILY_UPDATE_READY_TIME = "15:25"
+POST_CLOSE_REVIEW_READY_TIME = "20:00"
+DAILY_SCHEDULE_VERSION = 2
+MONITOR_STALE_GRACE_SECONDS = 90
+DAILY_UPDATE_STALE_GRACE_SECONDS = 20 * 60
 UNIVERSE_CACHE_REFRESH_SECONDS = 24 * 60 * 60
 UNIVERSE_BATCH_SIZE = 50
 SHENWAN_UNIVERSE_PATTERN = re.compile(r"^CN_Equity_(SW[123])_(\d{6})$")
@@ -69,6 +83,40 @@ FLASH_DEFAULT_STATE = {
     "lastLoopErrorAt": None,
 }
 
+DAILY_DEFAULT_STATE = {
+    "running": False,
+    "scheduleVersion": None,
+    "startedAt": None,
+    "lastStoppedAt": None,
+    "runtimeHost": None,
+    "runtimeObservedAt": None,
+    "lastHeartbeatAt": None,
+    "jobIds": [],
+    "lastPreMarketAttemptAt": None,
+    "lastPreMarketAttemptDate": None,
+    "lastPreMarketSuccessAt": None,
+    "lastPreMarketSuccessDate": None,
+    "lastPreMarketResultType": None,
+    "lastPreMarketResultSummary": None,
+    "preMarketConsecutiveFailures": 0,
+    "lastAttemptAt": None,
+    "lastAttemptDate": None,
+    "lastSuccessAt": None,
+    "lastSuccessDate": None,
+    "lastResultType": None,
+    "lastResultSummary": None,
+    "consecutiveFailures": 0,
+    "lastReviewAttemptAt": None,
+    "lastReviewAttemptDate": None,
+    "lastReviewSuccessAt": None,
+    "lastReviewSuccessDate": None,
+    "lastReviewResultType": None,
+    "lastReviewResultSummary": None,
+    "reviewConsecutiveFailures": 0,
+    "lastError": None,
+    "lastErrorAt": None,
+}
+
 
 class App:
     def __init__(self, config: Config | None = None):
@@ -83,6 +131,7 @@ class App:
         self.monitor_stop = threading.Event()
         self.flash_thread: threading.Thread | None = None
         self.flash_stop = threading.Event()
+        self._calendar_days: set[str] | None = None
 
     def set_context(self, ctx: Any) -> None:
         self.ctx = ctx
@@ -223,10 +272,18 @@ class App:
                 lines.append(json.dumps(latest, ensure_ascii=False)[:800])
         return "\n".join(lines)
 
-    def update_all(self) -> str:
+    def update_all(self, scheduled: bool = False) -> str:
+        today = today_text()
+        attempted_at = now_text()
+        if scheduled and not self._is_trading_day(today):
+            message = f"{today} 非交易日，已跳过定时日更。"
+            self._record_daily_update_result("skipped", message, attempted_at, today)
+            return "[SILENT] " + message
         rows = self.watchlist()
         if not rows:
-            return "自选列表为空，无法执行日更。"
+            message = "自选列表为空，无法执行日更。"
+            self._record_daily_update_result("skipped", message, attempted_at, today)
+            return ("[SILENT] " if scheduled else "") + message
         ok, failed = 0, []
         for item in rows:
             try:
@@ -243,7 +300,70 @@ class App:
                 ok += 1
             except Exception as exc:
                 failed.append(f"{item['symbol']}: {exc}")
-        return "\n".join(["✅ 日更完成", f"成功: {ok}", f"失败: {len(failed)}", *failed[:10]])
+        message = "\n".join(["✅ 日更完成", f"成功: {ok}", f"失败: {len(failed)}", *failed[:10]])
+        self._record_daily_update_result("success" if ok > 0 else "failed", message, attempted_at, today)
+        return message
+
+    def pre_market_brief(self, scheduled: bool = False) -> str:
+        today = today_text()
+        attempted_at = now_text()
+        if scheduled and not self._is_trading_day(today):
+            message = f"{today} 非交易日，已跳过盘前资讯简报。"
+            self._record_pre_market_result("skipped", message, attempted_at, today)
+            return "[SILENT] " + message
+        rows = self.watchlist()
+        if not rows:
+            message = "🚫 开盘前资讯简报已跳过：关注列表为空。"
+            self._record_pre_market_result("skipped", message, attempted_at, today)
+            return ("[SILENT] " if scheduled else "") + message
+        if not self.jin10.configured():
+            message = "🚫 开盘前资讯简报已跳过：Jin10 MCP 未配置，请设置 jin10ApiToken。"
+            self._record_pre_market_result("skipped", message, attempted_at, today)
+            return ("[SILENT] " if scheduled else "") + message
+        try:
+            window = _pre_market_window()
+            self._sync_pre_market_flash_window(window)
+            flashes = [
+                row for row in self.store.rows("jin10_flash")
+                if window["startTs"] <= int(row.get("published_ts") or 0) <= window["endTs"]
+                and PRE_MARKET_BRIEF_KEYWORD in str(row.get("content") or "")
+            ]
+            flashes = sorted(flashes, key=lambda row: int(row.get("published_ts") or 0), reverse=True)
+            message = self._build_pre_market_brief_text(window, rows, flashes)
+            self._record_pre_market_result("success", message, attempted_at, today)
+            return message
+        except Exception as exc:
+            message = f"⚠️ 开盘前资讯简报失败: {exc}"
+            self._record_pre_market_result("failed", message, attempted_at, today)
+            if scheduled:
+                return message
+            raise
+
+    def post_close_review(self, scheduled: bool = False) -> str:
+        today = today_text()
+        attempted_at = now_text()
+        if scheduled and not self._is_trading_day(today):
+            message = f"{today} 非交易日，已跳过收盘复盘。"
+            self._record_review_result("skipped", message, attempted_at, today)
+            return "[SILENT] " + message
+        rows = self.watchlist()
+        if not rows:
+            message = "自选列表为空，已跳过收盘复盘。"
+            self._record_review_result("skipped", message, attempted_at, today)
+            return ("[SILENT] " if scheduled else "") + message
+        lines = ["🧭 收盘复盘总览", f"复盘数量: {len(rows)} 只"]
+        ok, failed = 0, []
+        for item in rows:
+            try:
+                text = self.analyze(item["symbol"])
+                ok += 1
+                lines.append(f"• {item.get('name') or item['symbol']}（{item['symbol']}）: {_truncate(_first_nonempty_line(text), 160)}")
+            except Exception as exc:
+                failed.append(f"{item['symbol']}: {exc}")
+        lines.extend([f"成功: {ok}", f"失败: {len(failed)}", *failed[:10]])
+        message = "\n".join(lines)
+        self._record_review_result("success" if ok > 0 else "failed", message, attempted_at, today)
+        return message
 
     def analyze(self, symbol: str) -> str:
         symbol = normalize_symbol(symbol)
@@ -409,7 +529,9 @@ class App:
     def start_monitor(self) -> str:
         if not self.watchlist():
             return "⚠️ 无法启动实时监控\n原因: 关注列表为空，请先添加至少一只自选股。"
-        self._write_state("monitor-state.json", {"running": True, "startedAt": now_text(), "lastHeartbeatAt": None, "runtimeHost": "hermes_thread"})
+        state = self._read_state("monitor-state.json")
+        state.update({"running": True, "startedAt": state.get("startedAt") or now_text(), "lastStoppedAt": None, "runtimeHost": "hermes_thread", "runtimeObservedAt": now_text(), "lastLoopError": None, "lastLoopErrorAt": None})
+        self._write_state("monitor-state.json", state)
         if not self.monitor_thread or not self.monitor_thread.is_alive():
             self.monitor_stop.clear()
             self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
@@ -425,47 +547,90 @@ class App:
 
     def monitor_status(self) -> str:
         state = self._read_state("monitor-state.json")
-        return "\n".join(["📊 监控状态", f"状态: {'✅ 运行中' if state.get('running') else '⭕ 未启动'}", "运行方式: hermes_thread", f"轮询间隔: {self.config.request_interval} 秒", f"最近心跳: {state.get('lastHeartbeatAt') or '暂无'}", self.list_watchlist()])
+        thread_alive = bool(self.monitor_thread and self.monitor_thread.is_alive())
+        stale = _state_heartbeat_stale(state, self.config.request_interval, MONITOR_STALE_GRACE_SECONDS)
+        if state.get("running") and thread_alive and not stale:
+            status = "✅ 运行中"
+        elif state.get("running"):
+            status = "⚠️ 已启用但后台未正常心跳"
+        else:
+            status = "⭕ 未启动"
+        lines = [
+            "📊 监控状态",
+            f"状态: {status}",
+            "运行方式: hermes_thread",
+            f"轮询间隔: {self.config.request_interval} 秒",
+            f"后台线程: {'存活' if thread_alive else '未运行'}",
+            f"最近心跳: {_format_heartbeat(state.get('lastHeartbeatAt'), self.config.request_interval, MONITOR_STALE_GRACE_SECONDS) or '暂无'}",
+        ]
+        if state.get("lastLoopError"):
+            lines.append(f"最近异常: {state.get('lastLoopErrorAt') or '未知时间'} | {state.get('lastLoopError')}")
+        lines.append(self.list_watchlist())
+        return "\n".join(lines)
 
     def start_daily_update(self) -> str:
         if self.ctx is None:
             return "❌ 需要在 Hermes 会话中启动定时日更，以便调用内置 cronjob 工具。"
 
-        state = self._read_state("daily-update-state.json")
-        if state.get("running") and state.get("jobIds"):
-            return "\n".join(["✅ TickFlow 定时日更已启动", "运行方式: hermes_cron", f"任务: {', '.join(state.get('jobIds') or [])}"])
+        state = self._read_daily_state()
+        job_ids = list(state.get("jobIds") or [])
+        schedule_ready = state.get("running") and state.get("scheduleVersion") == DAILY_SCHEDULE_VERSION and len(job_ids) >= 3
+        if schedule_ready:
+            state.update({"runtimeHost": "hermes_cron", "runtimeObservedAt": now_text()})
+            self._write_daily_state(state)
+            return "\n".join(["✅ TickFlow 定时任务已启动", "运行方式: hermes_cron", "任务: " + ", ".join(job_ids)])
+
+        removed: list[str] = []
+        for job_id in job_ids:
+            try:
+                self.ctx.dispatch_tool("cronjob", {"action": "remove", "job_id": job_id})
+                removed.append(str(job_id))
+            except Exception:
+                pass
 
         jobs = [
+            self._create_cron_job(
+                name="TickFlow Assist 盘前资讯",
+                schedule="20 9 * * 1-5",
+                prompt=(
+                    "执行 TickFlow Assist 盘前资讯。调用 tickflow-assist 工具 pre_market_brief，参数 scheduled=true。"
+                    "最终只输出该工具返回 JSON 的 text 字段，不要改写，不要调用 send_message；Hermes cron 会自动投递。"
+                    "如果 text 以 [SILENT] 开头，原样输出。"
+                ),
+            ),
             self._create_cron_job(
                 name="TickFlow Assist 日更",
                 schedule="25 15 * * 1-5",
                 prompt=(
-                    "执行 TickFlow Assist A股日更。调用 update_all 工具更新全部自选股行情、K线、指标、财务与分析。"
-                    "最终只汇总 update_all 的关键结果；不要调用 send_message，Hermes cron 会自动投递。"
-                    "如果自选为空或没有有效更新，最终回复以 [SILENT] 开头。"
+                    "执行 TickFlow Assist A股日更。调用 tickflow-assist 工具 update_all，参数 scheduled=true，更新全部自选股行情、K线和指标。"
+                    "最终只输出该工具返回 JSON 的 text 字段，不要改写，不要调用 send_message；Hermes cron 会自动投递。"
+                    "如果 text 以 [SILENT] 开头，原样输出。"
                 ),
             ),
             self._create_cron_job(
                 name="TickFlow Assist 收盘复盘",
                 schedule="0 20 * * 1-5",
                 prompt=(
-                    "执行 TickFlow Assist 收盘复盘。先调用 list_watchlist 获取自选股；"
-                    "对每只自选股调用 analyze 工具生成综合分析；最终用中文给出精简复盘摘要。"
-                    "不要调用 send_message，Hermes cron 会自动投递。如果自选为空，最终回复以 [SILENT] 开头。"
+                    "执行 TickFlow Assist 收盘复盘。调用 tickflow-assist 工具 post_close_review，参数 scheduled=true。"
+                    "最终只输出该工具返回 JSON 的 text 字段，不要改写，不要调用 send_message；Hermes cron 会自动投递。"
+                    "如果 text 以 [SILENT] 开头，原样输出。"
                 ),
             ),
         ]
-        job_ids = [job_id for job_id in jobs if job_id]
-        if not job_ids:
+        new_job_ids = [job_id for job_id in jobs if job_id]
+        if len(new_job_ids) < 3:
             state.update({"running": False, "lastErrorAt": now_text(), "lastError": "Hermes cronjob did not return job_id"})
-            self._write_state("daily-update-state.json", state)
+            self._write_daily_state(state)
             return "❌ Hermes cron 任务创建失败，请确认 cronjob 工具在当前 Hermes 会话可用。"
-        state.update({"running": True, "startedAt": now_text(), "runtimeHost": "hermes_cron", "jobIds": job_ids})
-        self._write_state("daily-update-state.json", state)
-        return "\n".join(["✅ TickFlow 定时日更已交给 Hermes cron", "日更: 交易日 15:25", "复盘: 交易日 20:00", f"任务: {', '.join(job_ids)}"])
+        state.update({"running": True, "scheduleVersion": DAILY_SCHEDULE_VERSION, "startedAt": state.get("startedAt") or now_text(), "lastStoppedAt": None, "runtimeHost": "hermes_cron", "runtimeObservedAt": now_text(), "jobIds": new_job_ids, "lastError": None, "lastErrorAt": None})
+        self._write_daily_state(state)
+        lines = ["✅ TickFlow 定时任务已交给 Hermes cron", f"盘前资讯: 交易日 {PRE_MARKET_BRIEF_READY_TIME}", f"日更: 交易日 {DAILY_UPDATE_READY_TIME}", f"复盘: 交易日 {POST_CLOSE_REVIEW_READY_TIME}", f"任务: {', '.join(new_job_ids)}"]
+        if removed:
+            lines.append(f"已移除旧任务: {', '.join(removed)}")
+        return "\n".join(lines)
 
     def stop_daily_update(self) -> str:
-        state = self._read_state("daily-update-state.json")
+        state = self._read_daily_state()
         job_ids = list(state.get("jobIds") or [])
         removed: list[str] = []
         if self.ctx is not None:
@@ -477,12 +642,56 @@ class App:
                     pass
         state.update({"running": False, "lastStoppedAt": now_text()})
         state.pop("jobIds", None)
-        self._write_state("daily-update-state.json", state)
+        self._write_daily_state(state)
         return "🛑 TickFlow 定时日更已停止" + (f"\n已移除 Hermes cron 任务: {', '.join(removed)}" if removed else "")
 
     def daily_update_status(self) -> str:
-        state = self._read_state("daily-update-state.json")
-        return "\n".join(["🕒 盘前资讯 / 定时日更 / 收盘复盘状态", f"状态: {'✅ 运行中' if state.get('running') else '⭕ 未启动'}", "运行方式: hermes_cron", "配置来源: Hermes plugin/env/local.config.json", "调度: 日更 15:25 | 复盘 20:00 | 交易日周一至周五", f"Hermes cron 任务: {', '.join(state.get('jobIds') or []) or '暂无'}", f"最近成功: {state.get('lastSuccessAt') or '由 Hermes cron 输出记录'}", f"最近摘要: {state.get('lastResultSummary') or '请通过 Hermes /cron list 查看任务运行记录'}"])
+        state = self._read_daily_state()
+        today = today_text()
+        job_ids = list(state.get("jobIds") or [])
+        schedule_ok = state.get("running") and state.get("scheduleVersion") == DAILY_SCHEDULE_VERSION and len(job_ids) >= 3
+        status = "✅ 运行中" if schedule_ok else ("⚠️ 计划需重建" if state.get("running") else "⭕ 未启动")
+        lines = [
+            "🕒 盘前资讯 / 定时日更 / 收盘复盘状态",
+            f"状态: {status}",
+            "运行方式: hermes_cron",
+            "配置来源: Hermes plugin/env/local.config.json",
+            f"调度: 盘前资讯 {PRE_MARKET_BRIEF_READY_TIME} | 日更 {DAILY_UPDATE_READY_TIME} | 复盘 {POST_CLOSE_REVIEW_READY_TIME} | 交易日周一至周五",
+            f"Hermes cron 任务: {', '.join(job_ids) or '暂无'}",
+            f"最近注册: {state.get('runtimeObservedAt') or '暂无'}",
+            "",
+            "盘前资讯:",
+            f"• 今日已推送: {'是' if state.get('lastPreMarketSuccessDate') == today else '否'}",
+            f"• 最近尝试: {state.get('lastPreMarketAttemptAt') or '暂无'}",
+            f"• 最近成功: {state.get('lastPreMarketSuccessAt') or '暂无'}",
+            f"• 最近结果: {_format_task_result(state.get('lastPreMarketResultType'))}",
+            "",
+            "日更执行:",
+            f"• 今日已更新: {'是' if state.get('lastSuccessDate') == today else '否'}",
+            f"• 最近尝试: {state.get('lastAttemptAt') or '暂无'}",
+            f"• 最近成功: {state.get('lastSuccessAt') or '暂无'}",
+            f"• 最近结果: {_format_task_result(state.get('lastResultType'))}",
+            "",
+            "复盘执行:",
+            f"• 今日已复盘: {'是' if state.get('lastReviewSuccessDate') == today else '否'}",
+            f"• 最近尝试: {state.get('lastReviewAttemptAt') or '暂无'}",
+            f"• 最近成功: {state.get('lastReviewSuccessAt') or '暂无'}",
+            f"• 最近结果: {_format_task_result(state.get('lastReviewResultType'))}",
+        ]
+        for count_key, summary_key, title in [
+            ("preMarketConsecutiveFailures", "lastPreMarketResultSummary", "盘前资讯"),
+            ("consecutiveFailures", "lastResultSummary", "日更执行"),
+            ("reviewConsecutiveFailures", "lastReviewResultSummary", "复盘执行"),
+        ]:
+            failures = safe_int(state.get(count_key), 0) or 0
+            summary = state.get(summary_key)
+            if failures:
+                lines.append(f"{title}连续失败: {failures}")
+            if summary:
+                lines.append(f"{title}最近摘要: {summary}")
+        if state.get("lastError"):
+            lines.append(f"最近调度异常: {state.get('lastErrorAt') or '未知时间'} | {state.get('lastError')}")
+        return "\n".join(lines)
 
     def flash_monitor_status(self) -> str:
         state = self._read_flash_state()
@@ -763,7 +972,7 @@ class App:
             return False, str(exc)
 
     def _create_cron_job(self, name: str, schedule: str, prompt: str) -> str | None:
-        payload: dict[str, Any] = {"action": "create", "name": name, "schedule": schedule, "prompt": prompt}
+        payload: dict[str, Any] = {"action": "create", "name": name, "schedule": schedule, "prompt": prompt, "skills": ["stock-analysis"]}
         if not self.config.daily_update_notify:
             payload["deliver"] = "local"
         elif self.config.alert_delivery_target:
@@ -780,9 +989,18 @@ class App:
             state = self._read_state("monitor-state.json")
             if state.get("running"):
                 state["lastHeartbeatAt"] = now_text()
+                state["runtimeObservedAt"] = now_text()
                 self._write_state("monitor-state.json", state)
                 if is_trading_time():
-                    self._monitor_once()
+                    try:
+                        self._monitor_once()
+                        latest = self._read_state("monitor-state.json")
+                        latest.update({"lastLoopError": None, "lastLoopErrorAt": None})
+                        self._write_state("monitor-state.json", latest)
+                    except Exception as exc:
+                        latest = self._read_state("monitor-state.json")
+                        latest.update({"lastLoopError": str(exc), "lastLoopErrorAt": now_text()})
+                        self._write_state("monitor-state.json", latest)
             self.monitor_stop.wait(self.config.request_interval)
 
     def _monitor_once(self) -> None:
@@ -881,6 +1099,102 @@ class App:
         if len(points) >= 2:
             return points
         return [("09:30", current_price), ("15:00", current_price)]
+
+    def _sync_pre_market_flash_window(self, window: dict[str, Any]) -> None:
+        cursor = None
+        collected: list[dict[str, Any]] = []
+        for _ in range(12):
+            page = self.jin10.list_flash(cursor)
+            records = [_to_flash_record(item) for item in _flash_page_items(page)]
+            records = [item for item in records if item]
+            if not records:
+                break
+            collected.extend(records)
+            oldest_ts = min(int(item.get("published_ts") or 0) for item in records)
+            next_cursor = _flash_next_cursor(page)
+            if oldest_ts < int(window["startTs"]) or not _flash_has_more(page) or not next_cursor:
+                break
+            cursor = next_cursor
+        self._save_flash_records(collected)
+
+    def _build_pre_market_brief_text(self, window: dict[str, Any], watchlist: list[dict[str, Any]], flashes: list[dict[str, Any]]) -> str:
+        header = [
+            f"🌅 开盘前资讯简报｜{str(window['endAt'])[:10]}",
+            f"信息窗口: {window['startAt']} ~ {window['endAt']}",
+            f"整理快讯: {len(flashes)} 条 | 自选: {len(watchlist)} 只 | 规则命中: {len(_matched_pre_market_symbols(flashes, watchlist))} 只",
+            "",
+        ]
+        if not flashes:
+            return "\n".join([*header, f"本窗口未检索到标题含“{PRE_MARKET_BRIEF_KEYWORD}”的快讯，今日无新增盘前整理摘要。"])
+        prompt = _build_pre_market_prompt(window, watchlist, flashes)
+        if self.config.llm_base_url and self.config.llm_api_key and self.config.llm_model:
+            try:
+                generated = call_llm(self.config, PRE_MARKET_BRIEF_SYSTEM, prompt, max_tokens=1600, temperature=0.2)
+                if generated:
+                    return "\n".join([*header, generated.strip()])
+            except Exception:
+                pass
+        return "\n".join([*header, _fallback_pre_market_summary(flashes, watchlist)])
+
+    def _record_pre_market_result(self, result_type: str, message: str, attempted_at: str, date: str) -> None:
+        state = self._read_daily_state()
+        state.update({
+            "lastPreMarketAttemptAt": attempted_at,
+            "lastPreMarketAttemptDate": date,
+            "lastPreMarketResultType": result_type,
+            "lastPreMarketResultSummary": _summarize_task_message(message),
+            "preMarketConsecutiveFailures": (safe_int(state.get("preMarketConsecutiveFailures"), 0) or 0) + 1 if result_type == "failed" else 0,
+        })
+        if result_type == "success":
+            state.update({"lastPreMarketSuccessAt": attempted_at, "lastPreMarketSuccessDate": date})
+        self._write_daily_state(state)
+
+    def _record_daily_update_result(self, result_type: str, message: str, attempted_at: str, date: str) -> None:
+        state = self._read_daily_state()
+        state.update({
+            "lastAttemptAt": attempted_at,
+            "lastAttemptDate": date,
+            "lastResultType": result_type,
+            "lastResultSummary": _summarize_task_message(message),
+            "consecutiveFailures": (safe_int(state.get("consecutiveFailures"), 0) or 0) + 1 if result_type == "failed" else 0,
+        })
+        if result_type == "success":
+            state.update({"lastSuccessAt": attempted_at, "lastSuccessDate": date})
+        self._write_daily_state(state)
+
+    def _record_review_result(self, result_type: str, message: str, attempted_at: str, date: str) -> None:
+        state = self._read_daily_state()
+        state.update({
+            "lastReviewAttemptAt": attempted_at,
+            "lastReviewAttemptDate": date,
+            "lastReviewResultType": result_type,
+            "lastReviewResultSummary": _summarize_task_message(message),
+            "reviewConsecutiveFailures": (safe_int(state.get("reviewConsecutiveFailures"), 0) or 0) + 1 if result_type == "failed" else 0,
+        })
+        if result_type == "success":
+            state.update({"lastReviewSuccessAt": attempted_at, "lastReviewSuccessDate": date})
+        self._write_daily_state(state)
+
+    def _read_daily_state(self) -> dict[str, Any]:
+        return {**DAILY_DEFAULT_STATE, **self._read_state("daily-update-state.json")}
+
+    def _write_daily_state(self, state: dict[str, Any]) -> None:
+        self._write_state("daily-update-state.json", {**DAILY_DEFAULT_STATE, **state})
+
+    def _is_trading_day(self, date_text: str) -> bool:
+        try:
+            if self._calendar_days is None:
+                path = Path(self.config.calendar_file).expanduser()
+                raw = path.read_text(encoding="utf-8")
+                self._calendar_days = {line.strip() for line in raw.splitlines() if line.strip()}
+            if self._calendar_days:
+                return date_text in self._calendar_days
+        except Exception:
+            pass
+        try:
+            return datetime.fromisoformat(date_text).weekday() < 5
+        except Exception:
+            return now_cn().weekday() < 5
 
     def _instrument_name(self, symbol: str) -> str:
         try:
@@ -1319,6 +1633,129 @@ def _format_flash_backfill_status(state: dict[str, Any]) -> str:
     status = "进行中" if state.get("backfillCursor") else "空闲"
     added = safe_int(state.get("lastBackfillStored"), 0) or 0
     return f"{status}（最近补齐 {added} 条）" if added else status
+
+
+def _pre_market_window() -> dict[str, Any]:
+    today = today_text()
+    previous = (now_cn() - timedelta(days=1)).strftime("%Y-%m-%d")
+    start_at = f"{previous} 17:00:00"
+    end_at = f"{today} {PRE_MARKET_BRIEF_READY_TIME}:00"
+    return {"startAt": start_at, "endAt": end_at, "startTs": int((_parse_china_timestamp(start_at) or 0) * 1000), "endTs": int((_parse_china_timestamp(end_at) or 0) * 1000)}
+
+
+def _build_pre_market_prompt(window: dict[str, Any], watchlist: list[dict[str, Any]], flashes: list[dict[str, Any]]) -> str:
+    watch_lines = [
+        f"- {item.get('name') or item.get('symbol')}（{item.get('symbol')}） 行业: {item.get('sector') or '-'} 题材: {item.get('themes') or '-'}"
+        for item in watchlist[:30]
+    ]
+    flash_lines = [
+        f"- [{row.get('published_at')}] {_truncate(str(row.get('content') or ''), 700)}\n  链接: {row.get('url') or '-'}"
+        for row in flashes[:12]
+    ]
+    return "\n".join([
+        f"请生成 {str(window['endAt'])[:10]} 的开盘前资讯简报。",
+        f"信息窗口: {window['startAt']} ~ {window['endAt']}",
+        "",
+        "自选股:",
+        *watch_lines,
+        "",
+        "金十数据整理快讯:",
+        *flash_lines,
+    ])
+
+
+def _fallback_pre_market_summary(flashes: list[dict[str, Any]], watchlist: list[dict[str, Any]]) -> str:
+    matched_symbols = _matched_pre_market_symbols(flashes, watchlist)
+    major = "\n".join(f"• [{str(row.get('published_at') or '')[-8:-3]}] {_pre_market_headline(row)}" for row in flashes[:5])
+    matched = []
+    for item in watchlist:
+        cues = []
+        normalized_name = _normalize_flash_text(str(item.get("name") or ""))
+        for row in flashes:
+            text = _normalize_flash_text(str(row.get("content") or ""))
+            if normalized_name and normalized_name in text:
+                cues.append(_pre_market_headline(row))
+            else:
+                boards = [keyword for keyword in _flash_board_keywords(item) if _normalize_flash_text(keyword) in text]
+                if boards:
+                    cues.append(f"{'/'.join(boards[:2])}: {_pre_market_headline(row)}")
+            if len(cues) >= 2:
+                break
+        if cues:
+            matched.append(f"• {item.get('name') or item.get('symbol')}（{item.get('symbol')}）: {'；'.join(cues)}")
+    return "\n".join([
+        "🧭 重大要闻",
+        major or "• 暂无可提取的整理快讯。",
+        "",
+        "🎯 自选相关",
+        "\n".join(matched[:5]) if matched else "• 未发现直接命中自选股、行业或题材的盘前整理快讯。",
+        "",
+        "💡 潜在机会",
+        "• 关注快讯中反复出现的政策、AI、算力、机器人、能源、订单和业绩方向是否在竞价阶段获得资金确认。",
+        "",
+        "⚠️ 风险提示",
+        "• 若重大消息只带来高开但缺少量能承接，应优先防范冲高回落；海外宏观、制裁、关税与监管消息需等待后续确认。",
+        "",
+        "📌 开盘前关注清单",
+        f"• 自选直接/题材命中 {len(matched_symbols)} 只，开盘重点看竞价强弱、量能承接与回落后的资金回流。",
+    ])
+
+
+def _matched_pre_market_symbols(flashes: list[dict[str, Any]], watchlist: list[dict[str, Any]]) -> set[str]:
+    matched: set[str] = set()
+    for row in flashes:
+        text = _normalize_flash_text(str(row.get("content") or ""))
+        for item in watchlist:
+            keywords = _flash_direct_keywords(item) + _flash_board_keywords(item)
+            if any(_normalize_flash_text(keyword) in text for keyword in keywords if keyword):
+                matched.add(str(item.get("symbol") or ""))
+    return matched
+
+
+def _pre_market_headline(row: dict[str, Any]) -> str:
+    text = str(row.get("content") or "").strip()
+    text = re.sub(r"^【?金十数据整理】?[:：]?", "", text).strip()
+    return _truncate(text, 180)
+
+
+def _state_heartbeat_stale(state: dict[str, Any], interval_seconds: int, minimum_seconds: int) -> bool:
+    if not state.get("running"):
+        return False
+    heartbeat_at = state.get("lastHeartbeatAt") or state.get("runtimeObservedAt")
+    parsed = _parse_china_timestamp(heartbeat_at)
+    if parsed is None:
+        return False
+    threshold = max(int(interval_seconds or 1) * 3, minimum_seconds)
+    return time.time() - parsed > threshold
+
+
+def _format_heartbeat(value: Any, interval_seconds: int, minimum_seconds: int) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    parsed = _parse_china_timestamp(text)
+    if parsed is None:
+        return text
+    stale_seconds = max(0, int(time.time() - parsed))
+    threshold = max(int(interval_seconds or 1) * 3, minimum_seconds)
+    return f"{text}（已超时 {stale_seconds} 秒）" if stale_seconds > threshold else text
+
+
+def _format_task_result(value: Any) -> str:
+    return {"success": "成功", "failed": "失败", "skipped": "跳过"}.get(str(value or ""), "暂无")
+
+
+def _summarize_task_message(value: str, limit: int = 220) -> str:
+    lines = [line.strip() for line in str(value or "").splitlines() if line.strip() and not line.strip().startswith("[SILENT]")]
+    return _truncate(" | ".join(lines[:3]), limit) if lines else ""
+
+
+def _first_nonempty_line(value: str) -> str:
+    for line in str(value or "").splitlines():
+        text = line.strip()
+        if text and not text.startswith("```"):
+            return text
+    return ""
 
 
 def _to_flash_record(item: dict[str, Any]) -> dict[str, Any] | None:

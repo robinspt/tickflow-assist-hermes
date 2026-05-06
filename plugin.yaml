@@ -15,6 +15,8 @@ provides_tools:
   - view_analysis
   - backtest_key_levels
   - update_all
+  - pre_market_brief
+  - post_close_review
   - start_monitor
   - stop_monitor
   - monitor_status

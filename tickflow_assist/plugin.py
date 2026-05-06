@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from . import schemas, tools
@@ -19,6 +20,8 @@ COMMAND_MAP = {
     "ta_startmonitor": ("start_monitor", lambda s: {}),
     "ta_stopmonitor": ("stop_monitor", lambda s: {}),
     "ta_updateall": ("update_all", lambda s: {}),
+    "ta_premarketbrief": ("pre_market_brief", lambda s: {}),
+    "ta_postclosereview": ("post_close_review", lambda s: {}),
     "ta_dailyupdatestatus": ("daily_update_status", lambda s: {}),
     "ta_startdailyupdate": ("start_daily_update", lambda s: {}),
     "ta_stopdailyupdate": ("stop_daily_update", lambda s: {}),
@@ -52,8 +55,28 @@ def register(ctx):
                 ctx.register_skill(child.name, skill_md)
     ctx.register_hook("pre_llm_call", _pre_llm_context)
     _register_commands(ctx)
+    if os.environ.get("TICKFLOW_ASSIST_DISABLE_AUTOSTART") == "1":
+        return
+    app = None
     try:
         app = tools.get_app()
+    except Exception:
+        app = None
+    if app is None:
+        return
+    try:
+        monitor_state = app._read_state("monitor-state.json")
+        if monitor_state.get("running"):
+            app.start_monitor()
+    except Exception:
+        pass
+    try:
+        daily_state = app._read_daily_state()
+        if daily_state.get("running"):
+            app.start_daily_update()
+    except Exception:
+        pass
+    try:
         if app.jin10.configured():
             app.start_flash_monitor()
     except Exception:

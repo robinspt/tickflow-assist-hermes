@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -72,7 +73,15 @@ class FakeLanceTable:
 
 def test_registers_all_declared_tools():
     ctx = DummyCtx()
-    register(ctx)
+    previous = os.environ.get("TICKFLOW_ASSIST_DISABLE_AUTOSTART")
+    os.environ["TICKFLOW_ASSIST_DISABLE_AUTOSTART"] = "1"
+    try:
+        register(ctx)
+    finally:
+        if previous is None:
+            os.environ.pop("TICKFLOW_ASSIST_DISABLE_AUTOSTART", None)
+        else:
+            os.environ["TICKFLOW_ASSIST_DISABLE_AUTOSTART"] = previous
 
     assert set(ctx.tools) == set(schemas.TOOL_SCHEMAS)
     assert ctx.tools["add_stock"]["toolset"] == "tickflow-assist"
@@ -91,6 +100,8 @@ def test_registers_all_declared_tools():
         "ta_startmonitor",
         "ta_stopmonitor",
         "ta_updateall",
+        "ta_premarketbrief",
+        "ta_postclosereview",
         "ta_dailyupdatestatus",
         "ta_startdailyupdate",
         "ta_stopdailyupdate",
@@ -107,7 +118,15 @@ def test_registers_all_declared_tools():
 
 def test_command_handlers_return_text_field():
     ctx = DummyCtx()
-    register(ctx)
+    previous = os.environ.get("TICKFLOW_ASSIST_DISABLE_AUTOSTART")
+    os.environ["TICKFLOW_ASSIST_DISABLE_AUTOSTART"] = "1"
+    try:
+        register(ctx)
+    finally:
+        if previous is None:
+            os.environ.pop("TICKFLOW_ASSIST_DISABLE_AUTOSTART", None)
+        else:
+            os.environ["TICKFLOW_ASSIST_DISABLE_AUTOSTART"] = previous
     original = tools.HANDLERS["list_watchlist"]
     tools.HANDLERS["list_watchlist"] = lambda args: json.dumps({"ok": True, "text": "WATCHLIST"})
     try:
@@ -261,9 +280,47 @@ def test_start_daily_update_uses_hermes_cron_jobs():
 
     assert "Hermes cron" in result
     cron_calls = [args for name, args in ctx.calls if name == "cronjob"]
-    assert [call["action"] for call in cron_calls] == ["create", "create"]
-    assert [call["schedule"] for call in cron_calls] == ["25 15 * * 1-5", "0 20 * * 1-5"]
+    assert [call["action"] for call in cron_calls] == ["create", "create", "create"]
+    assert [call["schedule"] for call in cron_calls] == ["20 9 * * 1-5", "25 15 * * 1-5", "0 20 * * 1-5"]
     assert all(call["deliver"] == "telegram" for call in cron_calls)
+    assert all(call["skills"] == ["stock-analysis"] for call in cron_calls)
+
+
+def test_start_daily_update_migrates_old_two_job_schedule():
+    with tempfile.TemporaryDirectory() as tmp:
+        app = App(Config(database_path=tmp, alert_delivery_target="telegram"))
+        ctx = DispatchCtx()
+        app.set_context(ctx)
+        app._write_daily_state({"running": True, "scheduleVersion": 1, "jobIds": ["old-daily", "old-review"]})
+
+        result = app.start_daily_update()
+        state = app._read_daily_state()
+
+    cron_calls = [args for name, args in ctx.calls if name == "cronjob"]
+    assert [call["action"] for call in cron_calls] == ["remove", "remove", "create", "create", "create"]
+    assert state["scheduleVersion"] == 2
+    assert len(state["jobIds"]) == 3
+    assert "已移除旧任务" in result
+
+
+def test_monitor_status_marks_stale_running_state():
+    class MemoryStore:
+        def rows(self, name):
+            return []
+
+    with tempfile.TemporaryDirectory() as tmp:
+        app = App(Config(database_path=tmp, request_interval=30))
+        app.store = MemoryStore()
+        app._write_state(
+            "monitor-state.json",
+            {"running": True, "lastHeartbeatAt": "2026-05-05 15:21:08", "runtimeHost": "hermes_thread"},
+        )
+
+        text = app.monitor_status()
+
+    assert "状态: ⚠️ 已启用但后台未正常心跳" in text
+    assert "后台线程: 未运行" in text
+    assert "已超时" in text
 
 
 def test_flash_monitor_status_renders_runtime_state_and_latest_flash():

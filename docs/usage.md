@@ -10,6 +10,8 @@
 - `分析 002261`
 - `查看 002261 最近 3 次综合分析`
 - `更新全部股票`
+- `盘前资讯`
+- `收盘复盘`
 - `开始监控`
 - `监控状态`
 - `启动定时日更`
@@ -39,6 +41,8 @@
 - `/ta_startdailyupdate`
 - `/ta_stopdailyupdate`
 - `/ta_updateall`
+- `/ta_premarketbrief`
+- `/ta_postclosereview`
 - `/ta_dailyupdatestatus`
 - `/ta_testalert`
 - `/ta_screenstocks <自然语言选股条件>`
@@ -67,16 +71,19 @@ print(add_stock({"symbol": "002261", "costPrice": 34.15}))
 
 ## 监控与日更
 
-`start_monitor` 会在 Hermes 进程内启动 daemon thread，用于交易时段高频轮询自选股报价与 `key_levels`。
+`start_monitor` 会在 Hermes 进程内启动 daemon thread，用于交易时段高频轮询自选股报价与 `key_levels`。如果 Hermes 重启时状态文件仍为运行中，插件加载后会自动恢复线程；`/ta_monitorstatus` 会显示后台线程是否存活、心跳是否超时以及最近异常。
 
 Jin10 快讯监控在插件加载且 `jin10ApiToken` 已配置时自动启动 daemon thread。`/ta_flashstatus` 会显示后台轮询状态、轮询间隔、保留天数、关注列表、最近心跳、最近轮询、最近一轮入库/候选/告警、今日统计、续页补齐、最近清理、最近异常和最新快讯。
 
 `start_daily_update` 会创建 Hermes cron jobs：
 
+- 盘前资讯：交易日 09:20 调用 `pre_market_brief`
 - 日更：交易日 15:25 调用 `update_all`
-- 复盘：交易日 20:00 对自选股调用 `analyze`
+- 复盘：交易日 20:00 调用 `post_close_review`
 
-状态文件仍放在 `databasePath` 下，便于 `monitor_status` 和 `daily_update_status` 查看。
+这些 cron 会调用插件工具本身，由工具写回 `daily-update-state.json`。因此 `/ta_dailyupdatestatus` 会分别显示盘前资讯、日更、复盘的最近尝试、最近成功、今日是否完成和失败摘要。状态文件仍放在 `databasePath` 下，便于 `monitor_status` 和 `daily_update_status` 查看。
+
+Hermes cron 由 gateway 调度器触发，任务会在新的 agent session 中运行并注入 `stock-analysis` skill。若已创建任务但到点没有执行，先用 `/cron list`、`/cron status` 或 `hermes cron status` 检查 gateway 与任务状态。
 
 告警投递使用 `alertDeliveryTarget`，格式参考 Hermes delivery targets，例如 `telegram`、`telegram:-1001234567890`、`telegram:-1001234567890:17585`、`discord:999888777`。文本消息通过 Hermes `send_message` 发送；PNG 告警卡通过消息中的 `MEDIA:/path/to/file` 附加。
 

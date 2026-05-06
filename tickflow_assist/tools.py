@@ -156,7 +156,15 @@ def backtest_key_levels(args: dict, **kwargs) -> str:
 
 
 def update_all(args: dict, **kwargs) -> str:
-    return _wrap(lambda a: APP.update_all(), args)
+    return _wrap(lambda a: APP.update_all(bool(a.get("scheduled"))), args)
+
+
+def pre_market_brief(args: dict, **kwargs) -> str:
+    return _wrap(lambda a: APP.pre_market_brief(bool(a.get("scheduled"))), args)
+
+
+def post_close_review(args: dict, **kwargs) -> str:
+    return _wrap(lambda a: APP.post_close_review(bool(a.get("scheduled"))), args)
 
 
 def start_monitor(args: dict, **kwargs) -> str:
@@ -272,7 +280,8 @@ HANDLERS = {
         "add_stock", "remove_stock", "list_watchlist", "refresh_watchlist_names",
         "refresh_watchlist_profiles", "fetch_klines", "fetch_intraday_klines",
         "fetch_financials", "analyze", "view_analysis", "backtest_key_levels",
-        "update_all", "start_monitor", "stop_monitor", "monitor_status",
+        "update_all", "pre_market_brief", "post_close_review",
+        "start_monitor", "stop_monitor", "monitor_status",
         "start_daily_update", "stop_daily_update", "daily_update_status",
         "test_alert", "query_database", "mx_search", "mx_data", "mx_select_stock",
         "screen_stock_candidates", "list_eastmoney_watchlist",
