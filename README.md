@@ -91,7 +91,7 @@ export TICKFLOW_ASSIST_ALERT_IMAGE_ENABLED="true"
 - 自选：`add_stock`、`remove_stock`、`list_watchlist`、`refresh_watchlist_names`
 - 数据：`fetch_klines`、`fetch_intraday_klines`、`fetch_financials`、`update_all`
 - 分析：`analyze`、`view_analysis`、`backtest_key_levels`
-- 监控：`start_monitor`、`stop_monitor`、`monitor_status`
+- 监控：`start_monitor`、`stop_monitor`、`monitor_status`，包含上午开盘、上午收盘、下午开盘、今日收盘阶段提醒
 - 定时任务：`pre_market_brief`、`post_close_review`、`start_daily_update`、`stop_daily_update`、`daily_update_status`，内部使用 Hermes 进程线程定时调度
 - 数据库：`query_database`
 - 妙想/东方财富：`mx_search`、`mx_data`、`mx_select_stock`、`screen_stock_candidates`、`list_eastmoney_watchlist`、`sync_eastmoney_watchlist`、`push_eastmoney_watchlist`、`remove_eastmoney_watchlist`

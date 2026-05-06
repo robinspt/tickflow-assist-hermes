@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import tickflow_assist.core as core_module
 from tickflow_assist import schemas, tools
 from tickflow_assist.alert_media import _normalize_points, _scale_trading_x
 from tickflow_assist.clients import _extract_jin10_structured_result, _parse_json_rpc, _parse_json_rpc_batch, _repair_mojibake
@@ -267,6 +269,84 @@ def test_send_alert_uses_hermes_target_and_media_tag():
     assert ctx.calls == [
         ("send_message", {"action": "send", "target": "telegram:-100123", "message": "hello\nMEDIA:/tmp/card.png"})
     ]
+
+
+def test_monitor_once_sends_afternoon_start_notification_once():
+    class MemoryStore:
+        def __init__(self):
+            self.tables = {
+                "watchlist": [{"symbol": "002558.SZ", "name": "巨人网络", "costPrice": 32.79, "addedAt": "2026-04-17 09:30:00"}],
+                "key_levels": [],
+                "alert_log": [],
+            }
+
+        def rows(self, name):
+            return [dict(row) for row in self.tables.get(name, [])]
+
+        def add(self, name, rows):
+            self.tables.setdefault(name, []).extend(dict(row) for row in rows)
+
+    class FakeTickFlow:
+        def quotes(self, symbols):
+            return []
+
+    fixed_now = datetime(2026, 4, 17, 13, 2, 0, tzinfo=timezone(timedelta(hours=8)))
+    previous_now_cn = core_module.now_cn
+    previous_now_text = core_module.now_text
+    previous_today_text = core_module.today_text
+    core_module.now_cn = lambda: fixed_now
+    core_module.now_text = lambda: "2026-04-17 13:02:00"
+    core_module.today_text = lambda: "2026-04-17"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStore()
+            app = App(Config(database_path=tmp, calendar_file=str(Path(tmp) / "missing-calendar.txt"), alert_delivery_target="telegram", alert_image_enabled=False))
+            app.store = store
+            app.tickflow = FakeTickFlow()
+            app.set_context(DispatchCtx())
+            app._write_state(
+                "monitor-state.json",
+                {
+                    "running": True,
+                    "lastObservedPhase": "lunch_break",
+                    "lastObservedPhaseDate": "2026-04-17",
+                    "sessionNotificationsDate": "2026-04-17",
+                    "sessionNotificationsSent": [],
+                },
+            )
+
+            app._monitor_once()
+            app._write_state(
+                "monitor-state.json",
+                {
+                    "running": True,
+                    "lastObservedPhase": "lunch_break",
+                    "lastObservedPhaseDate": "2026-04-17",
+                    "sessionNotificationsDate": "2026-04-17",
+                    "sessionNotificationsSent": [],
+                },
+            )
+            app._monitor_once()
+            state = app._read_state("monitor-state.json")
+
+        send_calls = [args for name, args in app.ctx.calls if name == "send_message"]
+        assert len(send_calls) == 1
+        assert "🔔 开始下午盯盘" in send_calls[0]["message"]
+        assert "阶段: 下午盘开盘" in send_calls[0]["message"]
+        assert store.tables["alert_log"] == [
+            {
+                "symbol": "__system_session__",
+                "alert_date": "2026-04-17_PM",
+                "rule_name": "afternoon_start",
+                "message": "🔔 开始下午盯盘\n\n时间: 2026-04-17 13:02:00\n阶段: 下午盘开盘\n关注列表: 1只",
+                "triggered_at": "2026-04-17 13:02:00",
+            }
+        ]
+        assert state["sessionNotificationsSent"] == ["afternoon_start"]
+    finally:
+        core_module.now_cn = previous_now_cn
+        core_module.now_text = previous_now_text
+        core_module.today_text = previous_today_text
 
 
 def test_start_daily_update_uses_hermes_thread_scheduler():

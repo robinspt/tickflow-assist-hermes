@@ -71,7 +71,7 @@ print(add_stock({"symbol": "002261", "costPrice": 34.15}))
 
 ## 监控与日更
 
-`start_monitor` 会在 Hermes 进程内启动 daemon thread，用于交易时段高频轮询自选股报价与 `key_levels`。如果 Hermes 重启时状态文件仍为运行中，插件加载后会自动恢复线程；`/ta_monitorstatus` 会显示后台线程是否存活、心跳是否超时以及最近异常。
+`start_monitor` 会在 Hermes 进程内启动 daemon thread，用于交易时段高频轮询自选股报价与 `key_levels`。它也会发送阶段提醒：上午开盘、上午收盘、下午开盘、今日收盘各一次，并通过 `alert_log` 按上午盘/下午盘去重。如果 Hermes 重启时状态文件仍为运行中，插件加载后会自动恢复线程；`/ta_monitorstatus` 会显示后台线程是否存活、心跳是否超时以及最近异常。
 
 Jin10 快讯监控在插件加载且 `jin10ApiToken` 已配置时自动启动 daemon thread。`/ta_flashstatus` 会显示后台轮询状态、轮询间隔、保留天数、关注列表、最近心跳、最近轮询、最近一轮入库/候选/告警、今日统计、续页补齐、最近清理、最近异常和最新快讯。
 

@@ -12,7 +12,7 @@ from .alert_media import AlertCardInput, remove_alert_media, write_alert_card
 from .clients import Jin10Client, MxClient, TickFlowClient, call_llm
 from .config import Config, load_config, supports_financial, supports_intraday
 from .storage import LanceStore, SCHEMAS, json_text
-from .utils import fmt_price, hash_key, is_trading_time, normalize_symbol, now_cn, now_text, pct, safe_float, safe_int, symbol_code, today_text
+from .utils import fmt_price, hash_key, normalize_symbol, now_cn, now_text, pct, safe_float, safe_int, symbol_code, today_text
 
 
 ANALYSIS_SYSTEM = """你是一位A股综合分析师。基于提供的日K、技术指标、实时行情、财务和资讯材料，输出中文分析。
@@ -55,6 +55,7 @@ DAILY_SCHEDULE_VERSION = 2
 DAILY_UPDATE_LOOP_INTERVAL_SECONDS = 60
 MONITOR_STALE_GRACE_SECONDS = 90
 DAILY_UPDATE_STALE_GRACE_SECONDS = 20 * 60
+SYSTEM_SESSION_ALERT_SYMBOL = "__system_session__"
 UNIVERSE_CACHE_REFRESH_SECONDS = 24 * 60 * 60
 UNIVERSE_BATCH_SIZE = 50
 SHENWAN_UNIVERSE_PATTERN = re.compile(r"^CN_Equity_(SW[123])_(\d{6})$")
@@ -933,19 +934,22 @@ class App:
                 state["lastHeartbeatAt"] = now_text()
                 state["runtimeObservedAt"] = now_text()
                 self._write_state("monitor-state.json", state)
-                if is_trading_time():
-                    try:
-                        self._monitor_once()
-                        latest = self._read_state("monitor-state.json")
-                        latest.update({"lastLoopError": None, "lastLoopErrorAt": None})
-                        self._write_state("monitor-state.json", latest)
-                    except Exception as exc:
-                        latest = self._read_state("monitor-state.json")
-                        latest.update({"lastLoopError": str(exc), "lastLoopErrorAt": now_text()})
-                        self._write_state("monitor-state.json", latest)
+                try:
+                    self._monitor_once()
+                    latest = self._read_state("monitor-state.json")
+                    latest.update({"lastLoopError": None, "lastLoopErrorAt": None})
+                    self._write_state("monitor-state.json", latest)
+                except Exception as exc:
+                    latest = self._read_state("monitor-state.json")
+                    latest.update({"lastLoopError": str(exc), "lastLoopErrorAt": now_text()})
+                    self._write_state("monitor-state.json", latest)
             self.monitor_stop.wait(self.config.request_interval)
 
     def _monitor_once(self) -> None:
+        phase = self._monitor_phase()
+        self._maybe_send_session_notification(phase)
+        if phase != "trading":
+            return
         rows = self.watchlist()
         quotes = {q.get("symbol"): q for q in self.tickflow.quotes([r["symbol"] for r in rows])}
         levels = {r.get("symbol"): r for r in self.store.rows("key_levels")}
@@ -962,7 +966,7 @@ class App:
                     continue
                 hit = price <= target if op == "<=" else price >= target
                 key = hash_key(item["symbol"], field, today_text())
-                if hit and key not in {r.get("rule_name") for r in self.store.rows("alert_log") if r.get("symbol") == item["symbol"] and r.get("alert_date") == today_text()}:
+                if hit and not self._monitor_alert_sent(item["symbol"], key, _monitor_session_key()):
                     message = f"【{label}】{item.get('name')}（{item['symbol']}）现价 {price:.2f}，触发位 {target:.2f}"
                     media_path = None
                     if self.config.alert_image_enabled:
@@ -987,10 +991,81 @@ class App:
                             )
                         except Exception:
                             media_path = None
-                    self.send_alert(message, media_path=media_path)
-                    if media_path:
-                        remove_alert_media(media_path)
-                    self.store.add("alert_log", [{"symbol": item["symbol"], "alert_date": today_text(), "rule_name": key, "message": message, "triggered_at": now_text()}])
+                    self._send_monitor_alert(item["symbol"], key, message, media_path=media_path)
+
+    def _monitor_phase(self) -> str:
+        now = now_cn()
+        today = now.strftime("%Y-%m-%d")
+        if not self._is_trading_day(today):
+            return "not_trading_day"
+        hhmm = now.strftime("%H:%M")
+        if hhmm < "09:30":
+            return "pre_market"
+        if hhmm <= "11:30":
+            return "trading"
+        if hhmm < "13:00":
+            return "lunch_break"
+        if hhmm <= "15:00":
+            return "trading"
+        return "closed"
+
+    def _maybe_send_session_notification(self, phase: str) -> int:
+        now = now_text()
+        today = today_text()
+        hhmm = now[11:16]
+        state = self._read_state("monitor-state.json")
+        previous_phase = state.get("lastObservedPhase") if state.get("lastObservedPhaseDate") == today else None
+        sent = state.get("sessionNotificationsSent") if state.get("sessionNotificationsDate") == today else []
+        sent = [str(item) for item in sent] if isinstance(sent, list) else []
+        next_state = {
+            **state,
+            "lastObservedPhase": phase,
+            "lastObservedPhaseDate": today,
+            "sessionNotificationsDate": today,
+            "sessionNotificationsSent": list(sent),
+        }
+        event = _resolve_monitor_session_notification(str(previous_phase) if previous_phase else None, phase, hhmm, sent)
+        if not event:
+            self._write_state("monitor-state.json", next_state)
+            return 0
+
+        message = _format_monitor_system_notification(
+            event["title"],
+            [
+                f"时间: {now}",
+                f"阶段: {event['phaseText']}",
+                f"关注列表: {len(self.watchlist())}只",
+            ],
+        )
+        sent_ok = self._send_monitor_alert(SYSTEM_SESSION_ALERT_SYMBOL, event["id"], message)
+        session_key = _monitor_session_key()
+        if sent_ok or self._monitor_alert_sent(SYSTEM_SESSION_ALERT_SYMBOL, event["id"], session_key):
+            if event["id"] not in next_state["sessionNotificationsSent"]:
+                next_state["sessionNotificationsSent"].append(event["id"])
+        self._write_state("monitor-state.json", next_state)
+        return 1 if sent_ok else 0
+
+    def _send_monitor_alert(self, symbol: str, rule_name: str, message: str, media_path: Path | None = None) -> bool:
+        session_key = _monitor_session_key()
+        if self._monitor_alert_sent(symbol, rule_name, session_key):
+            if media_path:
+                remove_alert_media(media_path)
+            return False
+        ok, _ = self.send_alert(message, media_path=media_path)
+        if media_path:
+            remove_alert_media(media_path)
+        if not ok:
+            return False
+        self.store.add("alert_log", [{"symbol": symbol, "alert_date": session_key, "rule_name": rule_name, "message": message, "triggered_at": now_text()}])
+        return True
+
+    def _monitor_alert_sent(self, symbol: str, rule_name: str, session_key: str) -> bool:
+        return any(
+            row.get("symbol") == symbol
+            and row.get("rule_name") == rule_name
+            and row.get("alert_date") == session_key
+            for row in self.store.rows("alert_log")
+        )
 
     def _daily_update_loop(self) -> None:
         while not self.daily_stop.is_set():
@@ -1732,6 +1807,54 @@ def _format_task_result(value: Any) -> str:
 
 def _should_run_scheduled_task(state: dict[str, Any], attempt_key: str, success_key: str, today: str) -> bool:
     return state.get(attempt_key) != today and state.get(success_key) != today
+
+
+def _monitor_session_key() -> str:
+    now = now_cn()
+    suffix = "AM" if now.strftime("%H:%M") < "13:00" else "PM"
+    return f"{now.strftime('%Y-%m-%d')}_{suffix}"
+
+
+def _resolve_monitor_session_notification(previous_phase: str | None, current_phase: str, hhmm: str, sent: list[str]) -> dict[str, str] | None:
+    if (
+        "morning_start" not in sent
+        and current_phase == "trading"
+        and hhmm <= "11:30"
+        and (previous_phase == "pre_market" or (previous_phase != "trading" and _within_hhmm(hhmm, "09:30", "09:40")))
+    ):
+        return {"id": "morning_start", "title": "🔔 开始上午盯盘", "phaseText": "上午盘开盘"}
+
+    if (
+        "morning_end" not in sent
+        and current_phase == "lunch_break"
+        and (previous_phase == "trading" or (previous_phase != "lunch_break" and _within_hhmm(hhmm, "11:30", "11:40")))
+    ):
+        return {"id": "morning_end", "title": "🔔 上午盯盘结束", "phaseText": "上午盘收盘"}
+
+    if (
+        "afternoon_start" not in sent
+        and current_phase == "trading"
+        and hhmm >= "13:00"
+        and (previous_phase == "lunch_break" or (previous_phase != "trading" and _within_hhmm(hhmm, "13:00", "13:10")))
+    ):
+        return {"id": "afternoon_start", "title": "🔔 开始下午盯盘", "phaseText": "下午盘开盘"}
+
+    if (
+        "day_end" not in sent
+        and current_phase == "closed"
+        and (previous_phase == "trading" or (previous_phase != "closed" and _within_hhmm(hhmm, "15:00", "15:10")))
+    ):
+        return {"id": "day_end", "title": "🔔 今日盯盘结束", "phaseText": "今日收盘"}
+
+    return None
+
+
+def _within_hhmm(value: str, start: str, end: str) -> bool:
+    return start <= value <= end
+
+
+def _format_monitor_system_notification(title: str, lines: list[str]) -> str:
+    return f"{title}\n\n" + "\n".join(lines)
 
 
 def _summarize_task_message(value: str, limit: int = 220) -> str:
