@@ -81,8 +81,8 @@ Jin10 快讯监控在插件加载且 `jin10ApiToken` 已配置时自动启动 da
 - 日更：交易日 15:25 调用 `update_all`
 - 复盘：交易日 20:00 调用 `post_close_review`，输出收盘复盘总览和每只自选股详情。
 
-后台线程会直接调用插件工具，不经过 LLM、不消耗 token；如果 `dailyUpdateNotify=true`，会通过 `alertDeliveryTarget` 投递执行结果。收盘复盘会验证昨日活动关键位，给出明日沿用/微调/重算/暂停决策，结合已有金十快讯和行业资料生成新闻/板块段落，并把更新后的关键位写回 `key_levels` 与 `key_levels_history`。工具会写回 `daily-update-state.json`，因此 `/ta_dailyupdatestatus` 会分别显示盘前资讯、日更、复盘的最近尝试、最近成功、今日是否完成、失败摘要和最近投递异常。如果线程意外丢失，`/ta_dailyupdatestatus` 和 `/ta_*` 命令会尝试自动恢复未手动停用的调度线程；若 20:00 复盘曾因日更未完成而等待，后续日更成功后会继续补跑复盘。状态文件仍放在 `databasePath` 下，便于 `monitor_status` 和 `daily_update_status` 查看。
+后台线程会直接调用插件工具，不经过 LLM、不消耗 token；如果 `dailyUpdateNotify=true`，会通过 `alertDeliveryTarget` 投递执行结果。收盘复盘会验证昨日活动关键位，给出明日沿用/微调/重算/暂停决策，结合已有金十快讯和行业资料生成新闻/板块段落，并把更新后的关键位写回 `key_levels` 与 `key_levels_history`。工具会写回 `daily-update-state.json`，因此 `/ta_dailyupdatestatus` 会分别显示盘前资讯、日更、复盘的最近尝试、最近成功、今日是否完成、失败摘要和最近投递异常；盘前资讯的“今日已生成”只表示简报已生成，是否投递成功以“最近投递成功/异常”为准。如果线程意外丢失，`/ta_dailyupdatestatus` 和 `/ta_*` 命令会尝试自动恢复未手动停用的调度线程；若 20:00 复盘曾因日更未完成而等待，后续日更成功后会继续补跑复盘。状态文件仍放在 `databasePath` 下，便于 `monitor_status` 和 `daily_update_status` 查看。
 
-告警投递使用 `alertDeliveryTarget`，格式参考 Hermes delivery targets，例如 `telegram`、`telegram:-1001234567890`、`telegram:-1001234567890:17585`、`discord:999888777`。文本消息通过 Hermes `send_message` 发送；PNG 告警卡通过消息中的 `MEDIA:/path/to/file` 附加。
+告警投递使用 `alertDeliveryTarget`，格式参考 Hermes delivery targets，例如 `telegram`、`telegram:-1001234567890`、`telegram:-1001234567890:17585`、`discord:999888777`。文本消息优先通过 Hermes `send_message` 发送；PNG 告警卡通过消息中的 `MEDIA:/path/to/file` 附加。如果后台上下文没有 `send_message`，Telegram / Discord 会读取 Hermes gateway 的 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_HOME_CHANNEL` 或 `DISCORD_BOT_TOKEN` / `DISCORD_HOME_CHANNEL` 直投递。
 
 告警 PNG 版式复刻迁移前的 TickFlow 原版样式：市场涨跌背景、右上信号标签、左侧日内曲线、右侧关键价位和底部位阶带。Python 版会自动截断过长文本并错开位阶标签，避免文字重叠。

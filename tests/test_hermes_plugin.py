@@ -271,6 +271,83 @@ def test_send_alert_uses_hermes_target_and_media_tag():
     ]
 
 
+def test_send_alert_falls_back_to_direct_telegram_when_send_message_tool_is_missing():
+    class MissingSendMessageCtx:
+        def __init__(self):
+            self.calls = []
+
+        def dispatch_tool(self, name, args):
+            self.calls.append((name, args))
+            return json.dumps({"error": "Unknown tool: send_message"})
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"ok":true}'
+
+        def json(self):
+            return {"ok": True}
+
+    calls = []
+    previous_http_post = core_module._http_post
+    previous_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    os.environ["TELEGRAM_BOT_TOKEN"] = "test-token"
+    core_module._http_post = lambda url, **kwargs: calls.append((url, kwargs)) or FakeResponse()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = App(Config(database_path=tmp, alert_delivery_target="telegram:-100123:456", alert_image_enabled=False))
+            ctx = MissingSendMessageCtx()
+            app.set_context(ctx)
+            ok, detail = app.send_alert("hello")
+    finally:
+        core_module._http_post = previous_http_post
+        if previous_token is None:
+            os.environ.pop("TELEGRAM_BOT_TOKEN", None)
+        else:
+            os.environ["TELEGRAM_BOT_TOKEN"] = previous_token
+
+    assert ok is True
+    assert detail == "direct telegram delivery"
+    assert ctx.calls == [("send_message", {"action": "send", "target": "telegram:-100123:456", "message": "hello"})]
+    assert calls[0][0] == "https://api.telegram.org/bottest-token/sendMessage"
+    assert calls[0][1]["data"] == {"chat_id": "-100123", "text": "hello", "message_thread_id": "456"}
+
+
+def test_send_alert_falls_back_to_direct_discord_when_send_message_tool_is_missing():
+    class MissingSendMessageCtx:
+        def dispatch_tool(self, name, args):
+            return json.dumps({"success": False, "error": "Unknown tool: send_message"})
+
+    class FakeResponse:
+        status_code = 200
+        text = "{}"
+
+        def json(self):
+            return {}
+
+    calls = []
+    previous_http_post = core_module._http_post
+    previous_token = os.environ.get("DISCORD_BOT_TOKEN")
+    os.environ["DISCORD_BOT_TOKEN"] = "discord-token"
+    core_module._http_post = lambda url, **kwargs: calls.append((url, kwargs)) or FakeResponse()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = App(Config(database_path=tmp, alert_delivery_target="discord:999888777", alert_image_enabled=False))
+            app.set_context(MissingSendMessageCtx())
+            ok, detail = app.send_alert("hello discord")
+    finally:
+        core_module._http_post = previous_http_post
+        if previous_token is None:
+            os.environ.pop("DISCORD_BOT_TOKEN", None)
+        else:
+            os.environ["DISCORD_BOT_TOKEN"] = previous_token
+
+    assert ok is True
+    assert detail == "direct discord delivery"
+    assert calls[0][0] == "https://discord.com/api/v10/channels/999888777/messages"
+    assert calls[0][1]["headers"]["Authorization"] == "Bot discord-token"
+    assert calls[0][1]["json"] == {"content": "hello discord"}
+
+
 def test_monitor_once_sends_afternoon_start_notification_once():
     class MemoryStore:
         def __init__(self):
@@ -700,6 +777,32 @@ def test_daily_update_status_recovers_stale_running_state():
     assert "后台线程: 存活" in text
     assert "自动恢复: 已重新启动定时日更线程" in text
     assert state["running"] is True
+
+
+def test_daily_update_status_reports_premarket_generation_separately_from_delivery():
+    previous_today_text = core_module.today_text
+    core_module.today_text = lambda: "2026-05-07"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = App(Config(database_path=tmp))
+            app._write_daily_state(
+                {
+                    "running": False,
+                    "disabledByUser": True,
+                    "lastPreMarketSuccessDate": "2026-05-07",
+                    "lastPreMarketSuccessAt": "2026-05-07 09:20:53",
+                    "lastNotificationError": "Unknown tool: send_message",
+                    "lastNotificationErrorAt": "2026-05-07 09:21:21",
+                }
+            )
+
+            text = app.daily_update_status()
+    finally:
+        core_module.today_text = previous_today_text
+
+    assert "• 今日已生成: 是" in text
+    assert "今日已推送" not in text
+    assert "最近投递异常: 2026-05-07 09:21:21 | Unknown tool: send_message" in text
 
 
 def test_monitor_status_marks_stale_running_state():

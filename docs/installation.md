@@ -125,7 +125,15 @@ TICKFLOW_ASSIST_JIN10_API_TOKEN=jin10_xxx
 - `slack`：Slack home channel
 - `sms:+15551234567`：指定手机号
 
-监控和测试告警通过 Hermes 内置 `send_message` 工具发送，实际可用目标取决于 Hermes gateway 中已配置的平台和 home channel。PNG 告警卡使用 Hermes 支持的 `MEDIA:/path/to/file` 格式附加到消息中。
+监控和测试告警会优先通过 Hermes 内置 `send_message` 工具发送，实际可用目标取决于 Hermes gateway 中已配置的平台和 home channel。PNG 告警卡使用 Hermes 支持的 `MEDIA:/path/to/file` 格式附加到消息中。
+
+如果后台线程所在的插件上下文没有暴露 `send_message`，插件会对 Telegram / Discord 自动使用 Bot API 直投递：
+
+- Telegram 需要 `TELEGRAM_BOT_TOKEN`；`alertDeliveryTarget=telegram` 时还需要 `TELEGRAM_HOME_CHANNEL`，如果 target 已写成 `telegram:-1001234567890` 或 `telegram:-1001234567890:17585` 则使用其中的 chat/topic。
+- Discord 需要 `DISCORD_BOT_TOKEN`；`alertDeliveryTarget=discord` 时还需要 `DISCORD_HOME_CHANNEL`，如果 target 已写成 `discord:999888777` 则使用其中的 channel。
+- Telegram 直投递会读取 `TELEGRAM_PROXY`，适合服务器访问 Telegram API 需要代理的环境。
+
+这些变量通常已经由 `hermes gateway setup` 写入 `~/.hermes/.env`；本插件只读取，不会把平台 bot token 写入 `local.config.json`。
 
 本项目只使用 Hermes delivery target 格式；不要配置通道/目标拆分字段。
 

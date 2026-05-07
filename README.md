@@ -139,6 +139,8 @@ export TICKFLOW_ASSIST_ALERT_IMAGE_ENABLED="true"
 - `discord:999888777`：发送到指定 Discord channel
 - `slack`：发送到 Slack home channel
 
+后台告警和定时任务会优先调用 Hermes `send_message`。如果当前 Hermes 插件上下文没有暴露该工具，插件会对 Telegram / Discord 自动使用 Bot API 直投递；此时需要 Hermes gateway 的 `~/.hermes/.env` 或环境变量中存在 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_HOME_CHANNEL` 或 `DISCORD_BOT_TOKEN` / `DISCORD_HOME_CHANNEL`。当 `alertDeliveryTarget` 已写明具体 chat/channel，例如 `telegram:-1001234567890` 或 `discord:999888777`，可不依赖 home channel。
+
 ### 启用插件
 
 Hermes 插件默认是 opt-in。源码目录链接到 `~/.hermes/plugins/tickflow-assist` 后，还需要显式启用插件：

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -845,7 +846,7 @@ class App:
         lines.extend([
             "",
             "盘前资讯:",
-            f"• 今日已推送: {'是' if state.get('lastPreMarketSuccessDate') == today else '否'}",
+            f"• 今日已生成: {'是' if state.get('lastPreMarketSuccessDate') == today else '否'}",
             f"• 最近尝试: {state.get('lastPreMarketAttemptAt') or '暂无'}",
             f"• 最近成功: {state.get('lastPreMarketSuccessAt') or '暂无'}",
             f"• 最近结果: {_format_task_result(state.get('lastPreMarketResultType'))}",
@@ -1139,12 +1140,15 @@ class App:
         return "✅ 测试告警发送成功（文本）" if ok else f"❌ 测试告警发送失败\n原因: {detail}"
 
     def send_alert(self, message: str, media_path: Path | None = None) -> tuple[bool, str | None]:
-        if self.ctx is None:
-            return False, "Hermes context unavailable"
         try:
             target = self.config.alert_delivery_target
             if not target:
                 return False, "请配置 alertDeliveryTarget，例如 telegram、telegram:CHAT_ID、telegram:CHAT_ID:THREAD_ID、discord:CHANNEL_ID。"
+            if self.ctx is None:
+                ok, detail = _send_direct_delivery(target, message, media_path)
+                if ok:
+                    return ok, detail
+                return False, f"Hermes context unavailable；直投递失败: {detail}"
             content = message
             if media_path:
                 content = f"{message}\nMEDIA:{media_path}"
@@ -1152,12 +1156,21 @@ class App:
             result = self.ctx.dispatch_tool("send_message", payload)
             parsed = json.loads(result) if isinstance(result, str) else result
             if isinstance(parsed, dict) and parsed.get("error"):
-                return False, str(parsed.get("error"))
+                detail = str(parsed.get("error"))
+                if _unknown_tool(detail):
+                    return _send_direct_delivery(target, message, media_path)
+                return False, detail
             if isinstance(parsed, dict) and parsed.get("success") is False:
-                return False, str(parsed)
+                detail = str(parsed)
+                if _unknown_tool(detail):
+                    return _send_direct_delivery(target, message, media_path)
+                return False, detail
             return True, str(result)
         except Exception as exc:
-            return False, str(exc)
+            detail = str(exc)
+            if _unknown_tool(detail):
+                return _send_direct_delivery(self.config.alert_delivery_target, message, media_path)
+            return False, detail
 
     def _monitor_loop(self) -> None:
         while not self.monitor_stop.is_set():
@@ -2748,6 +2761,171 @@ def _extract_eastmoney_stocks(value: Any) -> list[dict[str, Any]]:
 def _table_alias(value: str) -> str:
     aliases = {"自选": "watchlist", "日k": "klines_daily", "日线": "klines_daily", "分钟k": "klines_intraday", "指标": "indicators", "关键价位": "key_levels", "分析日志": "analysis_log", "告警日志": "alert_log"}
     return aliases.get(value.lower(), value)
+
+
+def _send_direct_delivery(target: str, message: str, media_path: Path | None = None) -> tuple[bool, str | None]:
+    channel, parts = _parse_delivery_target(target)
+    try:
+        if channel == "telegram":
+            return _send_telegram_direct(parts, message, media_path)
+        if channel == "discord":
+            return _send_discord_direct(parts, message, media_path)
+        return False, f"Hermes send_message 不可用，且当前 alertDeliveryTarget '{target}' 不支持直投递。"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _send_telegram_direct(parts: list[str], message: str, media_path: Path | None = None) -> tuple[bool, str | None]:
+    token = _delivery_env("TICKFLOW_ASSIST_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN")
+    if not token:
+        return False, "Hermes send_message 不可用，且 TELEGRAM_BOT_TOKEN 未配置，无法直投 Telegram。"
+    chat_id = parts[0].strip() if parts and parts[0].strip() else _delivery_env("TICKFLOW_ASSIST_TELEGRAM_HOME_CHANNEL", "TELEGRAM_HOME_CHANNEL")
+    if not chat_id:
+        return False, "Hermes send_message 不可用；alertDeliveryTarget 未包含 Telegram chat_id，且 TELEGRAM_HOME_CHANNEL 未配置。"
+    thread_id = parts[1].strip() if len(parts) > 1 and parts[1].strip() else ""
+    base_url = f"https://api.telegram.org/bot{token}"
+    proxies = _telegram_proxies()
+    for chunk in _message_chunks(message, 3900):
+        data = {"chat_id": chat_id, "text": chunk}
+        if thread_id:
+            data["message_thread_id"] = thread_id
+        response = _http_post(f"{base_url}/sendMessage", data=data, proxies=proxies)
+        error = _delivery_response_error("Telegram", response)
+        if error:
+            return False, error
+    if media_path:
+        path = Path(media_path)
+        if not path.exists():
+            return False, f"Telegram 直投递失败: 附件不存在 {path}"
+        method = "sendPhoto" if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp"} else "sendDocument"
+        field = "photo" if method == "sendPhoto" else "document"
+        data = {"chat_id": chat_id}
+        if thread_id:
+            data["message_thread_id"] = thread_id
+        with path.open("rb") as file_obj:
+            response = _http_post(f"{base_url}/{method}", data=data, files={field: (path.name, file_obj)}, proxies=proxies)
+        error = _delivery_response_error("Telegram", response)
+        if error:
+            return False, error
+    return True, "direct telegram delivery"
+
+
+def _send_discord_direct(parts: list[str], message: str, media_path: Path | None = None) -> tuple[bool, str | None]:
+    token = _delivery_env("TICKFLOW_ASSIST_DISCORD_BOT_TOKEN", "DISCORD_BOT_TOKEN")
+    if not token:
+        return False, "Hermes send_message 不可用，且 DISCORD_BOT_TOKEN 未配置，无法直投 Discord。"
+    channel_id = parts[0].strip() if parts and parts[0].strip() else _delivery_env("TICKFLOW_ASSIST_DISCORD_HOME_CHANNEL", "DISCORD_HOME_CHANNEL")
+    if not channel_id:
+        return False, "Hermes send_message 不可用；alertDeliveryTarget 未包含 Discord channel_id，且 DISCORD_HOME_CHANNEL 未配置。"
+    url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+    headers = {"Authorization": f"Bot {token}"}
+    for chunk in _message_chunks(message, 1900):
+        response = _http_post(url, headers={**headers, "Content-Type": "application/json"}, json={"content": chunk})
+        error = _delivery_response_error("Discord", response)
+        if error:
+            return False, error
+    if media_path:
+        path = Path(media_path)
+        if not path.exists():
+            return False, f"Discord 直投递失败: 附件不存在 {path}"
+        payload = {"content": ""}
+        with path.open("rb") as file_obj:
+            response = _http_post(url, headers=headers, data={"payload_json": json.dumps(payload, ensure_ascii=False)}, files={"files[0]": (path.name, file_obj)})
+        error = _delivery_response_error("Discord", response)
+        if error:
+            return False, error
+    return True, "direct discord delivery"
+
+
+def _parse_delivery_target(target: str) -> tuple[str, list[str]]:
+    parts = [part.strip() for part in str(target or "").split(":")]
+    return (parts[0].lower() if parts else "", parts[1:])
+
+
+def _message_chunks(message: str, limit: int) -> list[str]:
+    text = str(message or "")
+    if not text:
+        return []
+    chunks = []
+    remaining = text
+    while len(remaining) > limit:
+        cut = max(remaining.rfind("\n", 0, limit), remaining.rfind("。", 0, limit), remaining.rfind(" ", 0, limit))
+        if cut < max(80, limit // 3):
+            cut = limit
+        chunks.append(remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+def _delivery_response_error(platform: str, response: Any) -> str | None:
+    status = safe_int(getattr(response, "status_code", 200), 200) or 200
+    text = str(getattr(response, "text", "") or "")
+    parsed = None
+    try:
+        parsed = response.json()
+    except Exception:
+        parsed = None
+    if status >= 400:
+        return f"{platform} 直投递失败: HTTP {status} {_truncate(text, 300)}".strip()
+    if isinstance(parsed, dict) and parsed.get("ok") is False:
+        detail = parsed.get("description") or parsed.get("error") or text
+        return f"{platform} 直投递失败: {_truncate(str(detail), 300)}"
+    if isinstance(parsed, dict) and parsed.get("success") is False:
+        return f"{platform} 直投递失败: {_truncate(str(parsed), 300)}"
+    return None
+
+
+def _telegram_proxies() -> dict[str, str] | None:
+    proxy = _delivery_env("TICKFLOW_ASSIST_TELEGRAM_PROXY", "TELEGRAM_PROXY")
+    if not proxy:
+        return None
+    return {"http": proxy, "https": proxy}
+
+
+def _delivery_env(*names: str) -> str:
+    for name in names:
+        value = os.getenv(name)
+        if value and value.strip():
+            return value.strip()
+    hermes_env = _read_hermes_dotenv()
+    for name in names:
+        value = hermes_env.get(name)
+        if value and value.strip():
+            return value.strip()
+    return ""
+
+
+def _read_hermes_dotenv() -> dict[str, str]:
+    path = Path.home() / ".hermes" / ".env"
+    out: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return out
+    for raw in lines:
+        line = raw.strip()
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        out[key] = value
+    return out
+
+
+def _http_post(url: str, **kwargs: Any) -> Any:
+    import requests
+
+    kwargs.setdefault("timeout", 30)
+    return requests.post(url, **kwargs)
 
 
 def _unknown_tool(detail: str | None) -> bool:
