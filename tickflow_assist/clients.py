@@ -150,13 +150,24 @@ class Jin10Client:
     def _initialize(self) -> None:
         self._request("initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "tickflow-assist-hermes", "version": "0.3.9"}})
         self._notify("notifications/initialized")
+        for method in ["tools/list", "resources/list"]:
+            try:
+                self._request(method, {})
+            except Exception:
+                pass
         self.initialized = True
 
     def _call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-        if not self.initialized:
-            result = self._initialize_and_call_tool(name, arguments)
-            self.initialized = True
-        else:
+        try:
+            if not self.initialized:
+                self._initialize()
+            result = self._request("tools/call", {"name": name, "arguments": arguments})
+        except RuntimeError as exc:
+            if not _is_jin10_session_not_found(exc):
+                raise
+            self.session_id = None
+            self.initialized = False
+            self._initialize()
             result = self._request("tools/call", {"name": name, "arguments": arguments})
         if not result:
             raise RuntimeError(f"jin10 tool {name} returned empty result")
@@ -190,7 +201,14 @@ class Jin10Client:
         return parsed.get("result")
 
     def _notify(self, method: str) -> None:
-        requests.post(self.url, headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.token}", "X-API-Key": self.token}, json={"jsonrpc": "2.0", "method": method}, timeout=20)
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.token}", "X-API-Key": self.token}
+        if self.session_id:
+            headers["mcp-session-id"] = self.session_id
+        response = requests.post(self.url, headers=headers, json={"jsonrpc": "2.0", "method": method}, timeout=20)
+        if response.headers.get("mcp-session-id"):
+            self.session_id = response.headers["mcp-session-id"]
+        if not response.ok:
+            raise RuntimeError(f"jin10 MCP notification failed: {response.status_code} {_decode_response_text(response)}")
 
     def _batch_request(self, payloads: list[dict[str, Any]]) -> list[Any]:
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.token}", "X-API-Key": self.token, "Accept": "application/json, text/event-stream"}
@@ -353,6 +371,11 @@ def _extract_jin10_tool_error(result: dict[str, Any]) -> str:
     if isinstance(content, str) and content:
         return content
     return "Tool execution error"
+
+
+def _is_jin10_session_not_found(error: Exception) -> bool:
+    text = str(error).lower()
+    return "session not found" in text or ("404" in text and "session" in text)
 
 
 def _extract_jin10_structured_result(result: dict[str, Any]) -> Any:

@@ -78,6 +78,12 @@ FLASH_ALERT_FRESHNESS_GRACE_SECONDS = 30
 FLASH_NOISE_PATTERNS = [re.compile(r"^金十图示[:：]"), re.compile(r"交易学院正在直播中")]
 FLASH_HIGH_IMPORTANCE_KEYWORDS = ["重组", "减持", "增持", "业绩预告", "业绩快报", "中标", "签署", "订单", "停牌", "复牌", "监管", "问询", "处罚", "回购"]
 MARKET_OVERVIEW_FLASH_KEYWORDS = ["港股收评", "每日投行/机构观点梳理", "A股每日市场要闻回顾", "A 股每日市场要闻回顾"]
+DEFAULT_MARKET_INDEXES = [
+    {"symbol": "000001.SH", "name": "上证指数"},
+    {"symbol": "399001.SZ", "name": "深证成指"},
+]
+DAILY_UPDATE_KLINE_DAYS = 90
+DAILY_UPDATE_STOCK_ADJUST = "forward"
 LEVEL_BUFFER = 0.005
 FLASH_DEFAULT_STATE = {
     "initialized": False,
@@ -267,9 +273,9 @@ class App:
                 lines.append(f"• {item['name']}（{item['symbol']}）: {item['error']}")
         return "\n".join(lines)
 
-    def fetch_klines(self, symbol: str, count: int = 90, persist: bool = True) -> list[dict[str, Any]]:
+    def fetch_klines(self, symbol: str, count: int = 90, persist: bool = True, adjust: str = "forward") -> list[dict[str, Any]]:
         symbol = normalize_symbol(symbol)
-        rows = self.tickflow.klines(symbol, count=count)
+        rows = self.tickflow.klines(symbol, count=count, adjust=adjust)
         if persist and rows:
             self.store.replace_where("klines_daily", f"symbol = '{symbol}'", rows)
         return rows
@@ -304,29 +310,68 @@ class App:
             self._record_daily_update_result("skipped", message, attempted_at, today)
             return "[SILENT] " + message
         rows = self.watchlist()
-        if not rows:
-            message = "自选列表为空，无法执行日更。"
-            self._record_daily_update_result("skipped", message, attempted_at, today)
-            return ("[SILENT] " if scheduled else "") + message
-        ok, failed = 0, []
-        for item in rows:
-            try:
-                klines = self.fetch_klines(item["symbol"], count=120, persist=True)
-                if klines:
-                    from .indicators import calculate_indicators
+        lines = [
+            f"📊 收盘更新: {len(rows)} 只股票 + {len(DEFAULT_MARKET_INDEXES)} 个指数, 获取 {DAILY_UPDATE_KLINE_DAYS} 天日K与当日分钟K (个股复权: {DAILY_UPDATE_STOCK_ADJUST})",
+            f"🔑 TickFlow API Key Level: {_format_api_key_level(self.config.tickflow_api_key_level)}",
+            "",
+            "📈 指数更新:",
+        ]
+        index_ok, index_failed = 0, 0
+        for item in DEFAULT_MARKET_INDEXES:
+            result = self._update_market_target(item["symbol"], item["name"], "index", DAILY_UPDATE_KLINE_DAYS, "none")
+            lines.append(result["line"])
+            if result["ok"]:
+                index_ok += 1
+            else:
+                index_failed += 1
 
-                    self.store.replace_where("indicators", f"symbol = '{item['symbol']}'", calculate_indicators(klines))
-                if supports_intraday(self.config.tickflow_api_key_level):
-                    try:
-                        self.fetch_intraday(item["symbol"], count=240)
-                    except Exception:
-                        pass
-                ok += 1
-            except Exception as exc:
-                failed.append(f"{item['symbol']}: {exc}")
-        message = "\n".join(["✅ 日更完成", f"成功: {ok}", f"失败: {len(failed)}", *failed[:10]])
-        self._record_daily_update_result("success" if ok > 0 else "failed", message, attempted_at, today)
+        stock_ok, stock_failed = 0, 0
+        if not rows:
+            lines.extend(["", "📋 关注列表为空，已跳过个股更新"])
+        else:
+            lines.extend(["", "📋 个股更新:"])
+            for item in rows:
+                result = self._update_market_target(
+                    item["symbol"],
+                    item.get("name") or item["symbol"],
+                    "stock",
+                    DAILY_UPDATE_KLINE_DAYS,
+                    DAILY_UPDATE_STOCK_ADJUST,
+                )
+                lines.append(result["line"])
+                if result["ok"]:
+                    stock_ok += 1
+                else:
+                    stock_failed += 1
+        lines.append(f"🏁 完成: 指数 {index_ok} 成功, {index_failed} 失败 | 个股 {stock_ok} 成功, {stock_failed} 失败 (共 {len(rows)} 只)")
+        message = "\n".join(lines)
+        self._record_daily_update_result("success" if index_ok + stock_ok > 0 else "failed", message, attempted_at, today)
         return message
+
+    def _update_market_target(self, symbol: str, name: str, kind: str, days: int, adjust: str) -> dict[str, Any]:
+        symbol = normalize_symbol(symbol)
+        try:
+            klines = self.fetch_klines(symbol, count=days, persist=True, adjust=adjust)
+            if not klines:
+                return {"ok": False, "line": f"❌ {name}（{symbol}）: 返回数据为空"}
+            from .indicators import calculate_indicators
+
+            self.store.replace_where("indicators", f"symbol = '{symbol}'", calculate_indicators(klines))
+            intraday_summary = f"分钟K 已跳过（API Key Level={_format_api_key_level(self.config.tickflow_api_key_level)}）"
+            if supports_intraday(self.config.tickflow_api_key_level):
+                try:
+                    intraday_rows = self.fetch_intraday(symbol, count=240)
+                    intraday_summary = f"分钟K {len(intraday_rows)} 根"
+                except Exception as exc:
+                    intraday_summary = f"分钟K 更新失败，已跳过（{exc}）"
+            latest = klines[-1]
+            scope = "指数" if kind == "index" else "个股"
+            return {
+                "ok": True,
+                "line": f"✅ {name}（{symbol}）: {scope}日K {len(klines)} 根, {intraday_summary}, 最新 {latest.get('trade_date') or '-'} 收盘 {fmt_price(latest.get('close'))}",
+            }
+        except Exception as exc:
+            return {"ok": False, "line": f"❌ {name}（{symbol}）: {exc}"}
 
     def pre_market_brief(self, scheduled: bool = False) -> str:
         today = today_text()
@@ -1351,26 +1396,26 @@ class App:
             PRE_MARKET_BRIEF_READY_TIME <= hhmm <= PRE_MARKET_BRIEF_EXPIRE_TIME
             and _should_run_scheduled_task(state, "lastPreMarketAttemptDate", "lastPreMarketSuccessDate", today)
         ):
-            self._run_daily_scheduled_action(lambda: self.pre_market_brief(scheduled=True))
+            self._run_daily_scheduled_action(lambda: self.pre_market_brief(scheduled=True), "pre_market")
         elif hhmm > PRE_MARKET_BRIEF_EXPIRE_TIME and _should_run_scheduled_task(state, "lastPreMarketAttemptDate", "lastPreMarketSuccessDate", today):
             message = f"已超过盘前资讯窗口 {PRE_MARKET_BRIEF_READY_TIME}-{PRE_MARKET_BRIEF_EXPIRE_TIME}，今日不再补跑盘前资讯。"
             self._record_pre_market_result("skipped", message, now_text(), today)
         state = self._read_daily_state()
         if hhmm >= DAILY_UPDATE_READY_TIME and _should_run_scheduled_task(state, "lastAttemptDate", "lastSuccessDate", today):
-            self._run_daily_scheduled_action(lambda: self.update_all(scheduled=True))
+            self._run_daily_scheduled_action(lambda: self.update_all(scheduled=True), "daily_update")
         state = self._read_daily_state()
         if hhmm >= POST_CLOSE_REVIEW_READY_TIME and _should_run_review_task(state, today):
             if state.get("lastSuccessDate") != today:
                 message = f"今日日更尚未在 {DAILY_UPDATE_READY_TIME} 后成功完成，暂不执行收盘复盘"
                 self._record_review_result("waiting_daily_update", message, now_text(), today)
             else:
-                self._run_daily_scheduled_action(lambda: self.post_close_review(scheduled=True))
+                self._run_daily_scheduled_action(lambda: self.post_close_review(scheduled=True), "post_close_review")
 
-    def _run_daily_scheduled_action(self, fn) -> None:
+    def _run_daily_scheduled_action(self, fn, kind: str = "generic") -> None:
         message = fn()
         if self.config.daily_update_notify and not str(message).startswith("[SILENT]"):
             attempted_at = now_text()
-            ok, detail = self.send_alert(message)
+            ok, detail = self.send_alert(_format_scheduled_notification(kind, message))
             state = self._read_daily_state()
             state.update({
                 "lastNotificationAttemptAt": attempted_at,
@@ -2467,6 +2512,12 @@ def _format_task_result(value: Any) -> str:
     return {"success": "成功", "failed": "失败", "skipped": "跳过", "waiting_daily_update": "等待日更"}.get(str(value or ""), "暂无")
 
 
+def _format_api_key_level(value: Any) -> str:
+    aliases = {"free": "Free", "starter": "Starter", "pro": "Pro", "expert": "Expert"}
+    text = str(value or "").strip()
+    return aliases.get(text.lower(), text or "-")
+
+
 def _should_run_scheduled_task(state: dict[str, Any], attempt_key: str, success_key: str, today: str) -> bool:
     return state.get(attempt_key) != today and state.get(success_key) != today
 
@@ -2525,6 +2576,37 @@ def _within_hhmm(value: str, start: str, end: str) -> bool:
 
 def _format_monitor_system_notification(title: str, lines: list[str]) -> str:
     return f"{title}\n\n" + "\n".join(lines)
+
+
+def _format_scheduled_notification(kind: str, message: str) -> str:
+    if kind != "daily_update":
+        return message
+    success = str(message or "").lstrip().startswith(("📊", "📋", "✅"))
+    lines = _normalize_result_lines(message) if success else _select_update_notification_lines(message)
+    title = "📊 定时日更完成" if success else "❌ 定时日更失败"
+    return _format_monitor_system_notification(title, lines)
+
+
+def _select_update_notification_lines(result: str) -> list[str]:
+    lines = _normalize_result_lines(result)
+    head = lines[:4]
+    highlights = [line for line in lines if line.startswith("🏁")]
+    return _dedupe_lines([*head, *highlights])[:12]
+
+
+def _normalize_result_lines(result: str) -> list[str]:
+    return [line.strip() for line in str(result or "").splitlines() if line.strip() and not line.strip().startswith("[SILENT]")]
+
+
+def _dedupe_lines(lines: list[str]) -> list[str]:
+    out = []
+    seen = set()
+    for line in lines:
+        if line in seen:
+            continue
+        seen.add(line)
+        out.append(line)
+    return out
 
 
 def _summarize_task_message(value: str, limit: int = 220) -> str:

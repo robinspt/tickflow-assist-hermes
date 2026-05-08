@@ -25,7 +25,7 @@ TOOL_SCHEMAS = {
     "analyze": schema("analyze", "Run LLM stock analysis using stored K-lines, indicators, realtime quote, financials and news, then persist original LanceDB result tables.", {"symbol": SYMBOL}, ["symbol"]),
     "view_analysis": schema("view_analysis", "View latest or recent saved analyses. profile can be composite, technical, financial, news, or all.", {"symbol": SYMBOL, "profile": {"type": "string"}, "limit": COUNT}, ["symbol"]),
     "backtest_key_levels": schema("backtest_key_levels", "Review recent active key level snapshots without changing database schema.", {"symbol": SYMBOL, "recentLimit": COUNT}),
-    "update_all": schema("update_all", "Run one full daily update for all watchlist symbols.", {"scheduled": {"type": "boolean", "description": "Set true when invoked by the background scheduler."}}),
+    "update_all": schema("update_all", "Run one full daily update for market indexes and all watchlist symbols.", {"scheduled": {"type": "boolean", "description": "Set true when invoked by the background scheduler."}}),
     "pre_market_brief": schema("pre_market_brief", "Build and persist a pre-market Jin10 brief for the watchlist, then return the message text.", {"scheduled": {"type": "boolean", "description": "Set true when invoked by the background scheduler."}}),
     "post_close_review": schema("post_close_review", "Run post-close review for all watchlist symbols and record daily update status.", {"scheduled": {"type": "boolean", "description": "Set true when invoked by the background scheduler."}}),
     "start_monitor": schema("start_monitor", "Start Hermes-thread realtime price monitoring for watchlist symbols.", {}),

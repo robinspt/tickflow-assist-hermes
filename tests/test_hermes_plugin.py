@@ -7,9 +7,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import tickflow_assist.core as core_module
+import tickflow_assist.clients as clients_module
 from tickflow_assist import schemas, tools
 from tickflow_assist.alert_media import _normalize_points, _scale_trading_x
-from tickflow_assist.clients import _extract_jin10_structured_result, _parse_json_rpc, _parse_json_rpc_batch, _repair_mojibake
+from tickflow_assist.clients import Jin10Client, _extract_jin10_structured_result, _parse_json_rpc, _parse_json_rpc_batch, _repair_mojibake
 from tickflow_assist.core import _flash_has_more, _flash_next_cursor, _flash_page_items
 from tickflow_assist.config import Config, load_config
 from tickflow_assist.core import App
@@ -581,6 +582,79 @@ def test_daily_update_autostarts_by_default_until_user_stops():
                 app.daily_thread.join(timeout=2)
 
 
+def test_update_all_updates_market_indexes_and_reports_openclaw_style_summary():
+    class MemoryStore:
+        def __init__(self):
+            self.tables = {
+                "watchlist": [{"symbol": "002558.SZ", "name": "巨人网络", "costPrice": 32.79, "addedAt": "2026-05-08 09:30:00"}],
+                "klines_daily": [],
+                "indicators": [],
+                "klines_intraday": [],
+            }
+            self.replace_calls = []
+
+        def rows(self, name):
+            return [dict(row) for row in self.tables.get(name, [])]
+
+        def replace_where(self, name, predicate, rows):
+            self.replace_calls.append((name, predicate, [dict(row) for row in rows]))
+            if name == "klines_daily":
+                symbol = predicate.split("'")[1]
+                self.tables[name] = [row for row in self.tables[name] if row.get("symbol") != symbol]
+                self.tables[name].extend(dict(row) for row in rows)
+            else:
+                self.tables[name] = [dict(row) for row in rows]
+
+    class FakeTickFlow:
+        def __init__(self):
+            self.kline_calls = []
+
+        def klines(self, symbol, count=90, period="1d", adjust="forward"):
+            self.kline_calls.append((symbol, count, period, adjust))
+            return [
+                {
+                    "symbol": symbol,
+                    "trade_date": "2026-05-08",
+                    "timestamp": 1778227200000,
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.5,
+                    "close": 10.5,
+                    "volume": 1000.0,
+                    "amount": 10500.0,
+                    "prev_close": 10.0,
+                }
+            ]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = MemoryStore()
+        tickflow = FakeTickFlow()
+        app = App(Config(database_path=tmp, tickflow_api_key_level="free"))
+        app.store = store
+        app.tickflow = tickflow
+
+        text = app.update_all()
+
+    assert "📊 收盘更新: 1 只股票 + 2 个指数, 获取 90 天日K与当日分钟K" in text
+    assert "📈 指数更新:" in text
+    assert "✅ 上证指数（000001.SH）: 指数日K 1 根" in text
+    assert "✅ 深证成指（399001.SZ）: 指数日K 1 根" in text
+    assert "📋 个股更新:" in text
+    assert "✅ 巨人网络（002558.SZ）: 个股日K 1 根" in text
+    assert "🏁 完成: 指数 2 成功, 0 失败 | 个股 1 成功, 0 失败 (共 1 只)" in text
+    assert tickflow.kline_calls == [
+        ("000001.SH", 90, "1d", "none"),
+        ("399001.SZ", 90, "1d", "none"),
+        ("002558.SZ", 90, "1d", "forward"),
+    ]
+    assert any(call[0] == "klines_daily" and "000001.SH" in call[1] for call in store.replace_calls)
+    notification = core_module._format_scheduled_notification("daily_update", text)
+    assert notification.startswith("📊 定时日更完成\n\n📊 收盘更新:")
+    assert "✅ 深证成指（399001.SZ）" in notification
+    assert "✅ 巨人网络（002558.SZ）" in notification
+    assert "🏁 完成: 指数 2 成功" in notification
+
+
 def test_daily_update_once_skips_stale_premarket_and_runs_daily_update():
     current = [datetime(2026, 5, 6, 15, 26, 0, tzinfo=timezone(timedelta(hours=8)))]
     previous_now_cn = core_module.now_cn
@@ -952,6 +1026,72 @@ def test_flash_monitor_counts_backfill_separately_from_latest_poll():
     assert state["backfillCursor"] == "cursor-next"
     assert "最近一轮: 入库 1 条" in status
     assert "续页补齐: 进行中（最近补齐 2 条）" in status
+
+
+def test_jin10_client_reinitializes_when_mcp_session_expires():
+    class FakeResponse:
+        def __init__(self, status_code, text, headers=None):
+            self.status_code = status_code
+            self.text = text
+            self.content = text.encode("utf-8")
+            self.headers = headers or {}
+            self.ok = status_code < 400
+            self.encoding = "utf-8"
+            self.apparent_encoding = "utf-8"
+
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append({"url": url, "headers": dict(headers or {}), "json": json, "timeout": timeout})
+        if len(calls) == 1:
+            return FakeResponse(404, "session not found")
+        if json and json.get("method") == "initialize":
+            return FakeResponse(
+                200,
+                json_module.dumps({"jsonrpc": "2.0", "id": json["id"], "result": {"protocolVersion": "2025-11-25"}}),
+                {"mcp-session-id": "new-session"},
+            )
+        if json and json.get("method") == "notifications/initialized":
+            return FakeResponse(202, "")
+        if json and json.get("method") in {"tools/list", "resources/list"}:
+            return FakeResponse(200, json_module.dumps({"jsonrpc": "2.0", "id": json["id"], "result": {}}))
+        return FakeResponse(
+            200,
+            json_module.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": json["id"],
+                    "result": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": json_module.dumps({"data": {"items": [], "has_more": False}}, ensure_ascii=False),
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+    json_module = json
+    previous_post = clients_module.requests.post
+    clients_module.requests.post = fake_post
+    try:
+        client = Jin10Client(Config(jin10_mcp_url="https://mcp.jin10.com/mcp", jin10_api_token="token"))
+        client.initialized = True
+        client.session_id = "expired-session"
+        result = client.list_flash()
+    finally:
+        clients_module.requests.post = previous_post
+
+    assert result == {"data": {"items": [], "has_more": False}}
+    assert calls[0]["headers"]["mcp-session-id"] == "expired-session"
+    assert "mcp-session-id" not in calls[1]["headers"]
+    assert calls[2]["headers"]["mcp-session-id"] == "new-session"
+    assert calls[-1]["headers"]["mcp-session-id"] == "new-session"
+    assert client.session_id == "new-session"
+    assert client.initialized is True
 
 
 def test_refresh_profiles_uses_tickflow_universes_and_drops_news_titles():

@@ -78,7 +78,7 @@ Jin10 快讯监控在插件加载且 `jin10ApiToken` 已配置时自动启动 da
 定时日更会在插件加载时默认启动 Hermes 进程内 daemon thread；`/ta_startdailyupdate` 可手动恢复，`/ta_stopdailyupdate` 会显式停用自动调度。线程按固定时间检查并执行：
 
 - 盘前资讯：交易日 09:20 调用 `pre_market_brief`，窗口至 09:30；错过窗口后只记录跳过，不会在 15:25 前补跑阻塞日更。
-- 日更：交易日 15:25 调用 `update_all`
+- 日更：交易日 15:25 调用 `update_all`，更新上证指数、深证成指和全部自选股的日K/指标，并在 TickFlow API Key 支持时同步分钟K。
 - 复盘：交易日 20:00 调用 `post_close_review`，输出收盘复盘总览和每只自选股详情。
 
 后台线程会直接调用插件工具，不经过 LLM、不消耗 token；如果 `dailyUpdateNotify=true`，会通过 `alertDeliveryTarget` 投递执行结果。收盘复盘会验证昨日活动关键位，给出明日沿用/微调/重算/暂停决策，结合已有金十快讯和行业资料生成新闻/板块段落，并把更新后的关键位写回 `key_levels` 与 `key_levels_history`。工具会写回 `daily-update-state.json`，因此 `/ta_dailyupdatestatus` 会分别显示盘前资讯、日更、复盘的最近尝试、最近成功、今日是否完成、失败摘要和最近投递异常；盘前资讯的“今日已生成”只表示简报已生成，是否投递成功以“最近投递成功/异常”为准。如果线程意外丢失，`/ta_dailyupdatestatus` 和 `/ta_*` 命令会尝试自动恢复未手动停用的调度线程；若 20:00 复盘曾因日更未完成而等待，后续日更成功后会继续补跑复盘。状态文件仍放在 `databasePath` 下，便于 `monitor_status` 和 `daily_update_status` 查看。
