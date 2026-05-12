@@ -391,14 +391,18 @@ class App:
             return ("[SILENT] " if scheduled else "") + message
         try:
             window = _pre_market_window()
-            self._sync_pre_market_flash_window(window)
+            sync_warning = None
+            try:
+                self._sync_pre_market_flash_window(window)
+            except Exception as exc:
+                sync_warning = f"本轮金十同步异常，已使用本地缓存生成简报: {exc}"
             flashes = [
                 row for row in self.store.rows("jin10_flash")
                 if window["startTs"] <= int(row.get("published_ts") or 0) <= window["endTs"]
                 and PRE_MARKET_BRIEF_KEYWORD in str(row.get("content") or "")
             ]
             flashes = sorted(flashes, key=lambda row: int(row.get("published_ts") or 0), reverse=True)
-            message = self._build_pre_market_brief_text(window, rows, flashes)
+            message = self._build_pre_market_brief_text(window, rows, flashes, sync_warning=sync_warning)
             self._record_pre_market_result("success", message, attempted_at, today)
             return message
         except Exception as exc:
@@ -553,7 +557,9 @@ class App:
         except Exception:
             quote = None
         latest = klines[-1] if klines else {}
-        latest_close = safe_float(latest.get("close")) or safe_float((quote or {}).get("last_price"))
+        latest_close = safe_float(latest.get("close"))
+        if latest_close is None:
+            latest_close = _quote_price(quote or {})
         change_pct = None
         if latest:
             prev_close = safe_float(latest.get("prev_close"))
@@ -561,8 +567,7 @@ class App:
             if prev_close and close is not None:
                 change_pct = (close - prev_close) / abs(prev_close) * 100
         if change_pct is None and quote:
-            ext = quote.get("ext") if isinstance(quote.get("ext"), dict) else {}
-            change_pct = safe_float(quote.get("change_pct") or ext.get("change_pct"))
+            change_pct = _quote_change_pct(quote)
         return {"latestClose": latest_close, "dailyChangePct": change_pct} if latest_close is not None or change_pct is not None else None
 
     def _post_close_market_overview(self, date_prefix: str) -> str | None:
@@ -573,8 +578,24 @@ class App:
         ]
         rows = sorted(rows, key=lambda row: str(row.get("published_at") or ""), reverse=True)
         if not rows:
-            return None
+            return self._post_close_index_overview()
         return "\n".join(f"• [{str(row.get('published_at') or '')[11:16]}] {_truncate(str(row.get('content') or ''), 120)}" for row in rows[:3])
+
+    def _post_close_index_overview(self) -> str | None:
+        lines = []
+        for item in DEFAULT_MARKET_INDEXES:
+            summary = self._post_close_market_summary(item["symbol"])
+            latest_close = safe_float((summary or {}).get("latestClose"))
+            change_pct = safe_float((summary or {}).get("dailyChangePct"))
+            if latest_close is None and change_pct is None:
+                continue
+            parts = [f"• {item['name']}（{item['symbol']}）"]
+            if latest_close is not None:
+                parts.append(f"收 {latest_close:.2f}")
+            if change_pct is not None:
+                parts.append(f"当日 {change_pct:+.2f}%")
+            lines.append("，".join(parts))
+        return "\n".join(lines) if lines else None
 
     def _post_close_flash_context(self, symbol: str, date_prefix: str) -> dict[str, list[dict[str, Any]]]:
         deliveries = [
@@ -631,7 +652,7 @@ class App:
             self.store.replace_where("indicators", f"symbol = '{symbol}'", calculate_indicators(klines))
         indicators = self._latest_rows("indicators", symbol, "trade_date", 40)
         quote = (self.tickflow.quotes([symbol]) or [{}])[0]
-        latest_price = safe_float(quote.get("last_price"), safe_float(klines[-1].get("close") if klines else None, 0.0)) or 0.0
+        latest_price = _quote_price(quote) or safe_float(klines[-1].get("close") if klines else None, 0.0) or 0.0
         news_docs: list[dict[str, Any]] = []
         try:
             news_docs = self.mx.search(f"{watch.get('name') if watch else symbol} 最新 公告 研报 资讯")[:5]
@@ -704,11 +725,17 @@ class App:
         candidates = _extract_candidates(result, limit)
         if not candidates:
             return f"🧭 智能选股候选池: {keyword}\n未解析到候选股票。"
-        quotes = {q.get("symbol"): q for q in self.tickflow.quotes([c["symbol"] for c in candidates])}
+        quotes = _quote_map(self.tickflow.quotes([c["symbol"] for c in candidates]))
         lines = [f"🧭 智能选股候选池: {keyword}", f"候选数: {len(candidates)}"]
         for idx, c in enumerate(candidates, 1):
             q = quotes.get(c["symbol"], {})
-            lines.append(f"{idx}. {c['name']}（{c['symbol']}） 现价: {fmt_price(q.get('last_price') or c.get('latestPrice'))} 涨跌幅: {pct(safe_float(q.get('change_pct') or c.get('changePct')))}")
+            latest_price = _quote_price(q)
+            if latest_price is None:
+                latest_price = safe_float(c.get("latestPrice"))
+            change_pct = _quote_change_pct(q)
+            if change_pct is None:
+                change_pct = safe_float(c.get("changePct"))
+            lines.append(f"{idx}. {c['name']}（{c['symbol']}） 现价: {fmt_price(latest_price)} 涨跌幅: {pct(change_pct)}")
             try:
                 kl = self.fetch_klines(c["symbol"], count=20, persist=False)
                 if kl:
@@ -800,10 +827,25 @@ class App:
         self._write_state("monitor-state.json", state)
         return "🛑 TickFlow 实时监控已停止"
 
+    def ensure_monitor_running(self) -> bool:
+        state = self._read_state("monitor-state.json")
+        if not state.get("running"):
+            return False
+        if self.monitor_thread and self.monitor_thread.is_alive():
+            return False
+        if not self.watchlist():
+            return False
+        self.start_monitor()
+        return True
+
     def monitor_status(self) -> str:
+        auto_recovered = self.ensure_monitor_running()
         state = self._read_state("monitor-state.json")
         thread_alive = bool(self.monitor_thread and self.monitor_thread.is_alive())
         stale = _state_heartbeat_stale(state, self.config.request_interval, MONITOR_STALE_GRACE_SECONDS)
+        watch_rows = self.watchlist()
+        level_symbols = {row.get("symbol") for row in self.store.rows("key_levels") if row.get("symbol")}
+        level_count = len([row for row in watch_rows if row.get("symbol") in level_symbols])
         if state.get("running") and thread_alive and not stale:
             status = "✅ 运行中"
         elif state.get("running"):
@@ -817,7 +859,17 @@ class App:
             f"轮询间隔: {self.config.request_interval} 秒",
             f"后台线程: {'存活' if thread_alive else '未运行'}",
             f"最近心跳: {_format_heartbeat(state.get('lastHeartbeatAt'), self.config.request_interval, MONITOR_STALE_GRACE_SECONDS) or '暂无'}",
+            f"可用关键位: {level_count}/{len(watch_rows)} 只",
         ]
+        if auto_recovered:
+            lines.append("自动恢复: 已重新启动实时监控线程")
+        if state.get("lastMonitorCheckAt"):
+            lines.append(
+                f"最近轮询: {state.get('lastMonitorCheckAt')} | 报价 {safe_int(state.get('lastQuoteCount'), 0) or 0} | "
+                f"关键位 {safe_int(state.get('lastKeyLevelCount'), 0) or 0} | 股价告警 {safe_int(state.get('lastPriceAlertCount'), 0) or 0}"
+            )
+        if state.get("lastPriceAlertError"):
+            lines.append(f"最近股价告警异常: {state.get('lastPriceAlertErrorAt') or '未知时间'} | {state.get('lastPriceAlertError')}")
         if state.get("lastLoopError"):
             lines.append(f"最近异常: {state.get('lastLoopErrorAt') or '未知时间'} | {state.get('lastLoopError')}")
         if state.get("lastSessionNotificationError"):
@@ -1238,26 +1290,36 @@ class App:
     def _monitor_once(self) -> None:
         phase = self._monitor_phase()
         self._maybe_send_session_notification(phase)
+        checked_at = now_text()
         if phase != "trading":
+            state = self._read_state("monitor-state.json")
+            state.update({"lastMonitorCheckAt": checked_at, "lastQuoteCount": 0, "lastKeyLevelCount": 0, "lastPriceAlertCount": 0})
+            self._write_state("monitor-state.json", state)
             return
         rows = self.watchlist()
-        quotes = {q.get("symbol"): q for q in self.tickflow.quotes([r["symbol"] for r in rows])}
+        quotes = _quote_map(self.tickflow.quotes([r["symbol"] for r in rows]))
         levels = {r.get("symbol"): r for r in self.store.rows("key_levels")}
+        key_level_count = 0
+        alert_count = 0
+        last_alert_error = None
         for item in rows:
             quote = quotes.get(item["symbol"]) or {}
             level = levels.get(item["symbol"]) or {}
-            price = safe_float(quote.get("last_price"))
+            if level:
+                key_level_count += 1
+            price = _quote_price(quote)
             if not price:
                 continue
-            rules = [("stop_loss", "<=", "止损位"), ("breakthrough", ">=", "突破位"), ("take_profit", ">=", "止盈位")]
-            for field, op, label in rules:
+            change_pct = _quote_change_pct(quote)
+            for field, op, label in _monitor_price_rules(level):
                 target = safe_float(level.get(field))
                 if target is None:
                     continue
                 hit = price <= target if op == "<=" else price >= target
                 key = hash_key(item["symbol"], field, today_text())
                 if hit and not self._monitor_alert_sent(item["symbol"], key, _monitor_session_key()):
-                    message = f"【{label}】{item.get('name')}（{item['symbol']}）现价 {price:.2f}，触发位 {target:.2f}"
+                    change_text = f"，涨跌幅 {change_pct:+.2f}%" if change_pct is not None else ""
+                    message = f"【{label}】{item.get('name')}（{item['symbol']}）现价 {price:.2f}{change_text}，触发位 {target:.2f}"
                     media_path = None
                     if self.config.alert_image_enabled:
                         try:
@@ -1281,7 +1343,23 @@ class App:
                             )
                         except Exception:
                             media_path = None
-                    self._send_monitor_alert(item["symbol"], key, message, media_path=media_path)
+                    sent, detail = self._send_monitor_alert_result(item["symbol"], key, message, media_path=media_path)
+                    if sent:
+                        alert_count += 1
+                    elif detail and detail != "duplicate":
+                        last_alert_error = detail
+        state = self._read_state("monitor-state.json")
+        state.update({
+            "lastMonitorCheckAt": checked_at,
+            "lastQuoteCount": len(quotes),
+            "lastKeyLevelCount": key_level_count,
+            "lastPriceAlertCount": alert_count,
+        })
+        if last_alert_error:
+            state.update({"lastPriceAlertError": last_alert_error, "lastPriceAlertErrorAt": now_text()})
+        elif alert_count:
+            state.update({"lastPriceAlertError": None, "lastPriceAlertErrorAt": None})
+        self._write_state("monitor-state.json", state)
 
     def _monitor_phase(self) -> str:
         now = now_cn()
@@ -1494,13 +1572,15 @@ class App:
             cursor = next_cursor
         self._save_flash_records(collected)
 
-    def _build_pre_market_brief_text(self, window: dict[str, Any], watchlist: list[dict[str, Any]], flashes: list[dict[str, Any]]) -> str:
+    def _build_pre_market_brief_text(self, window: dict[str, Any], watchlist: list[dict[str, Any]], flashes: list[dict[str, Any]], sync_warning: str | None = None) -> str:
         header = [
             f"🌅 开盘前资讯简报｜{str(window['endAt'])[:10]}",
             f"信息窗口: {window['startAt']} ~ {window['endAt']}",
             f"整理快讯: {len(flashes)} 条 | 自选: {len(watchlist)} 只 | 规则命中: {len(_matched_pre_market_symbols(flashes, watchlist))} 只",
             "",
         ]
+        if sync_warning:
+            header.extend([f"⚠️ {sync_warning}", ""])
         if not flashes:
             return "\n".join([*header, f"本窗口未检索到标题含“{PRE_MARKET_BRIEF_KEYWORD}”的快讯，今日无新增盘前整理摘要。"])
         prompt = _build_pre_market_prompt(window, watchlist, flashes)
@@ -2534,6 +2614,91 @@ def _monitor_session_key() -> str:
     now = now_cn()
     suffix = "AM" if now.strftime("%H:%M") < "13:00" else "PM"
     return f"{now.strftime('%Y-%m-%d')}_{suffix}"
+
+
+def _quote_map(quotes: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    mapped: dict[str, dict[str, Any]] = {}
+    for quote in quotes:
+        if not isinstance(quote, dict):
+            continue
+        symbol = _quote_symbol(quote)
+        if symbol:
+            mapped[symbol] = quote
+    return mapped
+
+
+def _quote_symbol(quote: dict[str, Any]) -> str | None:
+    for field in ["symbol", "ts_code", "code", "secuCode", "证券代码", "代码"]:
+        value = quote.get(field)
+        if value:
+            try:
+                return normalize_symbol(str(value))
+            except Exception:
+                text = str(value or "").strip().upper()
+                if text:
+                    return text
+    return None
+
+
+def _quote_price(quote: dict[str, Any]) -> float | None:
+    ext = quote.get("ext") if isinstance(quote.get("ext"), dict) else {}
+    for value in [
+        quote.get("last_price"),
+        quote.get("lastPrice"),
+        quote.get("latest_price"),
+        quote.get("latestPrice"),
+        quote.get("price"),
+        quote.get("close"),
+        quote.get("最新价"),
+        quote.get("现价"),
+        ext.get("last_price"),
+        ext.get("lastPrice"),
+        ext.get("latestPrice"),
+    ]:
+        parsed = safe_float(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _quote_change_pct(quote: dict[str, Any]) -> float | None:
+    ext = quote.get("ext") if isinstance(quote.get("ext"), dict) else {}
+    for value in [
+        quote.get("change_pct"),
+        quote.get("changePct"),
+        quote.get("pct_chg"),
+        quote.get("percent"),
+        quote.get("涨跌幅"),
+        quote.get("涨幅"),
+        ext.get("change_pct"),
+        ext.get("changePct"),
+        ext.get("pct_chg"),
+    ]:
+        parsed = safe_float(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _monitor_price_rules(level: dict[str, Any]) -> list[tuple[str, str, str]]:
+    rules: list[tuple[str, str, str]] = []
+    seen_targets: set[tuple[str, float]] = set()
+    for field, op, label in [
+        ("stop_loss", "<=", "止损位"),
+        ("support", "<=", "支撑位"),
+        ("take_profit", ">=", "止盈位"),
+        ("breakthrough", ">=", "突破位"),
+        ("resistance", ">=", "压力位"),
+    ]:
+        target = safe_float(level.get(field))
+        if target is None or target <= 0:
+            continue
+        marker = (op, round(target, 4))
+        if marker in seen_targets:
+            continue
+        seen_targets.add(marker)
+        rules.append((field, op, label))
+    return rules
 
 
 def _resolve_monitor_session_notification(previous_phase: str | None, current_phase: str, hhmm: str, sent: list[str]) -> dict[str, str] | None:

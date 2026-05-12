@@ -259,6 +259,16 @@ def test_alert_delivery_target_uses_hermes_format_only():
         assert load_config(root).alert_delivery_target == "telegram:-100123:456"
 
 
+def test_review_meta_does_not_render_nan_change_pct():
+    meta = core_module._format_review_market_meta(
+        {"symbol": "002558.SZ", "costPrice": 33.37},
+        {"latestClose": 31.63, "dailyChangePct": float("nan")},
+    )
+
+    assert meta == "• 收盘 31.63 | 成本 33.37"
+    assert "nan" not in meta.lower()
+
+
 def test_send_alert_uses_hermes_target_and_media_tag():
     with tempfile.TemporaryDirectory() as tmp:
         app = App(Config(database_path=tmp, alert_delivery_target="telegram:-100123", alert_image_enabled=False))
@@ -511,6 +521,73 @@ def test_monitor_session_notification_retries_after_send_failure_within_window()
         core_module.today_text = previous_today_text
 
 
+def test_monitor_once_alerts_support_with_quote_aliases():
+    class MemoryStore:
+        def __init__(self):
+            self.tables = {
+                "watchlist": [{"symbol": "002558.SZ", "name": "巨人网络", "costPrice": 32.79, "addedAt": "2026-05-06 09:30:00"}],
+                "key_levels": [
+                    {
+                        "symbol": "002558.SZ",
+                        "analysis_date": "2026-05-06",
+                        "current_price": 10.8,
+                        "stop_loss": 9.5,
+                        "breakthrough": 11.5,
+                        "support": 10.3,
+                        "cost_level": 32.79,
+                        "resistance": 11.0,
+                        "take_profit": 12.0,
+                        "gap": None,
+                        "target": 12.0,
+                        "round_number": 11.0,
+                        "analysis_text": "levels",
+                        "score": 60,
+                    }
+                ],
+                "alert_log": [],
+            }
+
+        def rows(self, name):
+            return [dict(row) for row in self.tables.get(name, [])]
+
+        def add(self, name, rows):
+            self.tables.setdefault(name, []).extend(dict(row) for row in rows)
+
+    class FakeTickFlow:
+        def quotes(self, symbols):
+            return [{"symbol": "002558", "lastPrice": 10.2, "changePct": -2.1}]
+
+    fixed_now = datetime(2026, 5, 6, 10, 0, 0, tzinfo=timezone(timedelta(hours=8)))
+    previous_now_cn = core_module.now_cn
+    previous_now_text = core_module.now_text
+    previous_today_text = core_module.today_text
+    core_module.now_cn = lambda: fixed_now
+    core_module.now_text = lambda: "2026-05-06 10:00:00"
+    core_module.today_text = lambda: "2026-05-06"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStore()
+            app = App(Config(database_path=tmp, calendar_file=str(Path(tmp) / "missing-calendar.txt"), alert_delivery_target="telegram", alert_image_enabled=False))
+            app.store = store
+            app.tickflow = FakeTickFlow()
+            app.set_context(DispatchCtx())
+
+            app._monitor_once()
+            state = app._read_state("monitor-state.json")
+
+        send_calls = [args for name, args in app.ctx.calls if name == "send_message"]
+        assert len(send_calls) == 1
+        assert "【支撑位】巨人网络（002558.SZ）现价 10.20，涨跌幅 -2.10%，触发位 10.30" in send_calls[0]["message"]
+        assert store.tables["alert_log"][0]["symbol"] == "002558.SZ"
+        assert state["lastQuoteCount"] == 1
+        assert state["lastKeyLevelCount"] == 1
+        assert state["lastPriceAlertCount"] == 1
+    finally:
+        core_module.now_cn = previous_now_cn
+        core_module.now_text = previous_now_text
+        core_module.today_text = previous_today_text
+
+
 def test_start_daily_update_uses_hermes_thread_scheduler():
     class MemoryStore:
         def rows(self, name):
@@ -696,6 +773,63 @@ def test_daily_update_once_skips_stale_premarket_and_runs_daily_update():
         core_module.today_text = previous_today_text
 
 
+def test_pre_market_brief_uses_cached_flashes_when_sync_times_out():
+    class MemoryStore:
+        def __init__(self):
+            published_at = "2026-05-12 08:30:00"
+            self.tables = {
+                "watchlist": [{"symbol": "002558.SZ", "name": "巨人网络", "costPrice": 32.79, "addedAt": "2026-05-06 09:30:00", "sector": "传媒", "themes": "游戏"}],
+                "jin10_flash": [
+                    {
+                        "flash_key": "cached-1",
+                        "published_at": published_at,
+                        "published_ts": int((core_module._parse_china_timestamp(published_at) or 0) * 1000),
+                        "content": "金十数据整理：A股每日市场要闻回顾 测试政策消息，游戏板块关注。",
+                        "url": "",
+                        "ingested_at": published_at,
+                        "raw_json": "{}",
+                    }
+                ],
+            }
+
+        def rows(self, name):
+            return [dict(row) for row in self.tables.get(name, [])]
+
+    class TimeoutJin10:
+        def configured(self):
+            return True
+
+        def list_flash(self, cursor=None):
+            raise TimeoutError("Read timed out")
+
+    fixed_now = datetime(2026, 5, 12, 9, 21, 0, tzinfo=timezone(timedelta(hours=8)))
+    previous_now_cn = core_module.now_cn
+    previous_now_text = core_module.now_text
+    previous_today_text = core_module.today_text
+    core_module.now_cn = lambda: fixed_now
+    core_module.now_text = lambda: "2026-05-12 09:21:00"
+    core_module.today_text = lambda: "2026-05-12"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = App(Config(database_path=tmp, jin10_api_token="token", llm_api_key=""))
+            app.store = MemoryStore()
+            app.jin10 = TimeoutJin10()
+
+            text = app.pre_market_brief(scheduled=True)
+            state = app._read_daily_state()
+
+    finally:
+        core_module.now_cn = previous_now_cn
+        core_module.now_text = previous_now_text
+        core_module.today_text = previous_today_text
+
+    assert "⚠️ 本轮金十同步异常，已使用本地缓存生成简报: Read timed out" in text
+    assert "🧭 重大要闻" in text
+    assert "失败" not in text.splitlines()[0]
+    assert state["lastPreMarketResultType"] == "success"
+    assert state["lastPreMarketSuccessDate"] == "2026-05-12"
+
+
 def test_daily_update_review_retries_after_waiting_for_daily_update():
     current = [datetime(2026, 5, 6, 20, 1, 0, tzinfo=timezone(timedelta(hours=8)))]
     previous_now_cn = core_module.now_cn
@@ -826,6 +960,35 @@ def test_post_close_review_formats_detail_and_persists_review_snapshot():
         core_module.now_cn = previous_now_cn
         core_module.now_text = previous_now_text
         core_module.today_text = previous_today_text
+
+
+def test_post_close_market_overview_falls_back_to_index_klines():
+    class MemoryStore:
+        def __init__(self):
+            self.tables = {
+                "jin10_flash": [],
+                "klines_daily": [
+                    {"symbol": "000001.SH", "trade_date": "2026-05-12", "close": 4214.49, "prev_close": 4225.02},
+                    {"symbol": "399001.SZ", "trade_date": "2026-05-12", "close": 15824.92, "prev_close": 15899.30},
+                ],
+            }
+
+        def rows(self, name):
+            return [dict(row) for row in self.tables.get(name, [])]
+
+    class FakeTickFlow:
+        def quotes(self, symbols):
+            return []
+
+    with tempfile.TemporaryDirectory() as tmp:
+        app = App(Config(database_path=tmp))
+        app.store = MemoryStore()
+        app.tickflow = FakeTickFlow()
+
+        overview = app._post_close_market_overview("2026-05-12")
+
+    assert "上证指数（000001.SH），收 4214.49，当日 -0.25%" in overview
+    assert "深证成指（399001.SZ），收 15824.92，当日 -0.47%" in overview
 
 
 def test_daily_update_status_recovers_stale_running_state():

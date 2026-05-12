@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any, Iterable
@@ -173,11 +174,26 @@ def _coerce_rows(name: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             elif kind == "str":
                 item[field] = "" if value is None else str(value)
             elif kind == "int":
-                item[field] = 0 if value is None else int(value)
+                number = _finite_number(value)
+                item[field] = 0 if number is None or not math.isfinite(number) else int(number)
             else:
-                item[field] = 0.0 if value is None else float(value)
+                number = _finite_number(value)
+                if number is None or not math.isfinite(number):
+                    item[field] = None if nullable else 0.0
+                else:
+                    item[field] = number
         output.append(item)
     return output
+
+
+def _finite_number(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def _all_rows_predicate() -> str:

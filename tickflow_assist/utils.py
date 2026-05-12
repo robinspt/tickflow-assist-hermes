@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from datetime import datetime, timezone, timedelta
 from typing import Any
@@ -71,7 +72,8 @@ def safe_float(value: Any, default: float | None = None) -> float | None:
     try:
         if value is None or value == "":
             return default
-        return float(value)
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else default
     except (TypeError, ValueError):
         return default
 
@@ -80,7 +82,10 @@ def safe_int(value: Any, default: int | None = None) -> int | None:
     try:
         if value is None or value == "":
             return default
-        return int(float(value))
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            return default
+        return int(parsed)
     except (TypeError, ValueError):
         return default
 

@@ -13,6 +13,9 @@ from .config import Config
 from .utils import as_list, first_nonempty, get_nested, normalize_symbol, safe_float
 
 
+JIN10_TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
+
+
 class TickFlowClient:
     def __init__(self, cfg: Config):
         self.base_url = cfg.tickflow_api_url.rstrip("/") + "/"
@@ -189,7 +192,7 @@ class Jin10Client:
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.token}", "X-API-Key": self.token, "Accept": "application/json, text/event-stream"}
         if self.session_id:
             headers["mcp-session-id"] = self.session_id
-        response = requests.post(self.url, headers=headers, json=payload, timeout=45)
+        response = _jin10_post(self.url, headers=headers, json=payload, timeout=45)
         if response.headers.get("mcp-session-id"):
             self.session_id = response.headers["mcp-session-id"]
         response_text = _decode_response_text(response)
@@ -204,7 +207,7 @@ class Jin10Client:
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.token}", "X-API-Key": self.token}
         if self.session_id:
             headers["mcp-session-id"] = self.session_id
-        response = requests.post(self.url, headers=headers, json={"jsonrpc": "2.0", "method": method}, timeout=20)
+        response = _jin10_post(self.url, headers=headers, json={"jsonrpc": "2.0", "method": method}, timeout=20)
         if response.headers.get("mcp-session-id"):
             self.session_id = response.headers["mcp-session-id"]
         if not response.ok:
@@ -214,7 +217,7 @@ class Jin10Client:
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.token}", "X-API-Key": self.token, "Accept": "application/json, text/event-stream"}
         if self.session_id:
             headers["mcp-session-id"] = self.session_id
-        response = requests.post(self.url, headers=headers, json=payloads, timeout=45)
+        response = _jin10_post(self.url, headers=headers, json=payloads, timeout=45)
         if response.headers.get("mcp-session-id"):
             self.session_id = response.headers["mcp-session-id"]
         response_text = _decode_response_text(response)
@@ -225,6 +228,26 @@ class Jin10Client:
         if errors:
             raise RuntimeError(f"jin10 MCP error: {errors[0]}")
         return [item.get("result") for item in parsed if isinstance(item, dict)]
+
+
+def _jin10_post(url: str, **kwargs) -> requests.Response:
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            response = requests.post(url, **kwargs)
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            last_error = exc
+            if attempt == 1:
+                raise
+        else:
+            if response.status_code in JIN10_TRANSIENT_STATUS_CODES and attempt == 0:
+                time.sleep(1.0)
+                continue
+            return response
+        time.sleep(1.0)
+    if last_error:
+        raise last_error
+    raise RuntimeError("jin10 MCP request failed before response")
 
 
 def call_llm(cfg: Config, system: str, user: str, max_tokens: int = 4096, temperature: float = 0.3) -> str:
