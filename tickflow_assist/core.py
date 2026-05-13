@@ -560,12 +560,7 @@ class App:
         latest_close = safe_float(latest.get("close"))
         if latest_close is None:
             latest_close = _quote_price(quote or {})
-        change_pct = None
-        if latest:
-            prev_close = safe_float(latest.get("prev_close"))
-            close = safe_float(latest.get("close"))
-            if prev_close and close is not None:
-                change_pct = (close - prev_close) / abs(prev_close) * 100
+        change_pct = _daily_change_pct_from_klines(klines)
         if change_pct is None and quote:
             change_pct = _quote_change_pct(quote)
         return {"latestClose": latest_close, "dailyChangePct": change_pct} if latest_close is not None or change_pct is not None else None
@@ -1332,7 +1327,7 @@ class App:
                                 trigger_price=target,
                                 cost_price=safe_float(item.get("costPrice")),
                                 note=message,
-                                points=self._alert_points(item["symbol"], price),
+                                points=self._alert_points(item["symbol"], price, quote),
                                 levels={
                                     "stop_loss": safe_float(level.get("stop_loss")),
                                     "support": safe_float(level.get("support")),
@@ -1493,16 +1488,17 @@ class App:
         message = fn()
         if self.config.daily_update_notify and not str(message).startswith("[SILENT]"):
             attempted_at = now_text()
-            ok, detail = self.send_alert(_format_scheduled_notification(kind, message))
+            results = [self.send_alert(item) for item in _format_scheduled_notifications(kind, message)]
+            errors = [detail or "send_alert failed" for ok, detail in results if not ok]
             state = self._read_daily_state()
             state.update({
                 "lastNotificationAttemptAt": attempted_at,
                 "lastNotificationTarget": self.config.alert_delivery_target,
             })
-            if ok:
+            if not errors:
                 state.update({"lastNotificationSentAt": attempted_at, "lastNotificationError": None, "lastNotificationErrorAt": None})
             else:
-                state.update({"lastNotificationError": detail or "send_alert failed", "lastNotificationErrorAt": attempted_at})
+                state.update({"lastNotificationError": "；".join(errors), "lastNotificationErrorAt": attempted_at})
             self._write_daily_state(state)
 
     def _write_alert_card(
@@ -1544,13 +1540,29 @@ class App:
             ),
         )
 
-    def _alert_points(self, symbol: str, current_price: float) -> list[tuple[str, float]]:
-        rows = self._latest_rows("klines_intraday", symbol, "trade_time", 8)
-        points = [(str(row.get("trade_time") or "")[-5:], safe_float(row.get("close")) or current_price) for row in rows]
-        if len(points) >= 2:
-            return points
-        daily = self._latest_rows("klines_daily", symbol, "trade_date", 8)
-        points = [(str(row.get("trade_date") or "")[-5:], safe_float(row.get("close")) or current_price) for row in daily]
+    def _alert_points(self, symbol: str, current_price: float, quote: dict[str, Any] | None = None) -> list[tuple[str, float]]:
+        rows = [
+            row for row in self.store.rows("klines_intraday")
+            if row.get("symbol") == symbol and str(row.get("period") or "1m") == "1m"
+        ]
+        rows = sorted(rows, key=lambda row: (str(row.get("trade_date") or ""), str(row.get("trade_time") or "")))
+        rows = [row for row in rows if str(row.get("trade_date") or "") == today_text()]
+
+        points = _dedupe_alert_points([
+            (time_label, price)
+            for row in rows
+            for time_label in [_alert_time_label(row.get("trade_time"))]
+            for price in [safe_float(row.get("close"))]
+            if time_label and price is not None
+        ])
+        if points:
+            quote_time = _quote_time_label(quote or {}) or now_cn().strftime("%H:%M")
+            if _alert_time_label(quote_time):
+                last_time = points[-1][0]
+                if quote_time == last_time:
+                    points[-1] = (last_time, current_price)
+                elif _alert_clock_minutes(quote_time) > _alert_clock_minutes(last_time):
+                    points.append((quote_time, current_price))
         if len(points) >= 2:
             return points
         return [("09:30", current_price), ("15:00", current_price)]
@@ -2680,6 +2692,81 @@ def _quote_change_pct(quote: dict[str, Any]) -> float | None:
     return None
 
 
+def _quote_time_label(quote: dict[str, Any]) -> str | None:
+    ext = quote.get("ext") if isinstance(quote.get("ext"), dict) else {}
+    for value in [
+        quote.get("trade_time"),
+        quote.get("tradeTime"),
+        quote.get("time"),
+        quote.get("timestamp"),
+        quote.get("datetime"),
+        quote.get("updated_at"),
+        quote.get("updatedAt"),
+        ext.get("trade_time"),
+        ext.get("tradeTime"),
+        ext.get("time"),
+        ext.get("timestamp"),
+    ]:
+        parsed = _alert_time_label(value)
+        if parsed:
+            return parsed
+        if isinstance(value, (int, float)):
+            try:
+                seconds = float(value) / 1000 if float(value) > 10_000_000_000 else float(value)
+                return datetime.fromtimestamp(seconds, tz=timezone(timedelta(hours=8))).strftime("%H:%M")
+            except (OSError, OverflowError, ValueError):
+                continue
+    return None
+
+
+def _alert_time_label(value: Any) -> str | None:
+    text = str(value or "").strip()
+    match = re.search(r"(?<!\d)(\d{1,2}):(\d{2})", text)
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour > 23 or minute > 59:
+        return None
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _alert_clock_minutes(time_label: str) -> int:
+    parsed = _alert_time_label(time_label)
+    if not parsed:
+        return 0
+    hour, minute = parsed.split(":")
+    return int(hour) * 60 + int(minute)
+
+
+def _dedupe_alert_points(points: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    deduped: list[tuple[str, float]] = []
+    for time_label, price in sorted(points, key=lambda item: _alert_clock_minutes(item[0])):
+        if deduped and deduped[-1][0] == time_label:
+            deduped[-1] = (time_label, price)
+        else:
+            deduped.append((time_label, price))
+    return deduped
+
+
+def _daily_change_pct_from_klines(klines: list[dict[str, Any]]) -> float | None:
+    if not klines:
+        return None
+    latest = klines[-1]
+    close = safe_float(latest.get("close"))
+    if close is None:
+        return None
+    previous_values: list[Any] = []
+    if len(klines) >= 2:
+        previous_values.append(klines[-2].get("close"))
+    previous_values.append(latest.get("prev_close"))
+    for value in previous_values:
+        previous_close = safe_float(value)
+        if previous_close:
+            return (close - previous_close) / abs(previous_close) * 100
+    return None
+
+
 def _monitor_price_rules(level: dict[str, Any]) -> list[tuple[str, str, str]]:
     rules: list[tuple[str, str, str]] = []
     seen_targets: set[tuple[str, float]] = set()
@@ -2743,6 +2830,12 @@ def _format_monitor_system_notification(title: str, lines: list[str]) -> str:
     return f"{title}\n\n" + "\n".join(lines)
 
 
+def _format_scheduled_notifications(kind: str, message: str) -> list[str]:
+    if kind == "post_close_review":
+        return _split_post_close_review_notifications(message)
+    return [_format_scheduled_notification(kind, message)]
+
+
 def _format_scheduled_notification(kind: str, message: str) -> str:
     if kind != "daily_update":
         return message
@@ -2750,6 +2843,35 @@ def _format_scheduled_notification(kind: str, message: str) -> str:
     lines = _normalize_result_lines(message) if success else _select_update_notification_lines(message)
     title = "📊 定时日更完成" if success else "❌ 定时日更失败"
     return _format_monitor_system_notification(title, lines)
+
+
+def _split_post_close_review_notifications(message: str) -> list[str]:
+    text = str(message or "").strip()
+    if not text:
+        return [text]
+    sections: list[str] = []
+    current: list[str] = []
+    for line in text.splitlines():
+        if _is_post_close_detail_header(line) and current:
+            sections.append("\n".join(current).strip())
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        sections.append("\n".join(current).strip())
+    detail_count = sum(1 for section in sections if _is_post_close_detail_header(_first_section_line(section)))
+    if detail_count <= 1:
+        return [text]
+    return [section for section in sections if section]
+
+
+def _is_post_close_detail_header(line: str) -> bool:
+    stripped = str(line or "").strip()
+    return stripped.startswith("**📘 收盘复盘｜") or stripped.startswith("**⚠️ 收盘复盘｜")
+
+
+def _first_section_line(section: str) -> str:
+    return next((line for line in str(section or "").splitlines() if line.strip()), "")
 
 
 def _select_update_notification_lines(result: str) -> list[str]:

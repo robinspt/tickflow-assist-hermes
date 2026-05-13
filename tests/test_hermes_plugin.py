@@ -269,6 +269,31 @@ def test_review_meta_does_not_render_nan_change_pct():
     assert "nan" not in meta.lower()
 
 
+def test_post_close_market_summary_prefers_previous_daily_close_for_change_pct():
+    class MemoryStore:
+        def rows(self, name):
+            if name != "klines_daily":
+                return []
+            return [
+                {"symbol": "002558.SZ", "trade_date": "2026-05-12", "close": 31.63, "prev_close": 31.2},
+                {"symbol": "002558.SZ", "trade_date": "2026-05-13", "close": 32.38, "prev_close": 32.3735},
+            ]
+
+    class FakeTickFlow:
+        def quotes(self, symbols):
+            return [{"symbol": "002558.SZ", "lastPrice": 32.38, "changePct": 0.02}]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        app = App(Config(database_path=tmp))
+        app.store = MemoryStore()
+        app.tickflow = FakeTickFlow()
+
+        summary = app._post_close_market_summary("002558.SZ")
+
+    assert summary["latestClose"] == 32.38
+    assert round(summary["dailyChangePct"], 2) == 2.37
+
+
 def test_send_alert_uses_hermes_target_and_media_tag():
     with tempfile.TemporaryDirectory() as tmp:
         app = App(Config(database_path=tmp, alert_delivery_target="telegram:-100123", alert_image_enabled=False))
@@ -588,6 +613,62 @@ def test_monitor_once_alerts_support_with_quote_aliases():
         core_module.today_text = previous_today_text
 
 
+def test_alert_points_use_intraday_clock_labels_and_append_quote_time():
+    class MemoryStore:
+        def __init__(self):
+            self.tables = {
+                "klines_intraday": [
+                    {"symbol": "002558.SZ", "period": "1m", "trade_date": "2026-05-12", "trade_time": "14:59:00", "close": 9.9},
+                    {"symbol": "002558.SZ", "period": "1m", "trade_date": "2026-05-13", "trade_time": "09:30:00", "close": 10.0},
+                    {"symbol": "002558.SZ", "period": "1m", "trade_date": "2026-05-13", "trade_time": "10:30:00", "close": 10.2},
+                    {"symbol": "002558.SZ", "period": "1m", "trade_date": "2026-05-13", "trade_time": "14:00:00", "close": 10.5},
+                ],
+            }
+
+        def rows(self, name):
+            return [dict(row) for row in self.tables.get(name, [])]
+
+    previous_today_text = core_module.today_text
+    core_module.today_text = lambda: "2026-05-13"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = App(Config(database_path=tmp))
+            app.store = MemoryStore()
+
+            points = app._alert_points("002558.SZ", 10.6, {"timestamp": "2026-05-13 14:12:30"})
+    finally:
+        core_module.today_text = previous_today_text
+
+    assert points == [("09:30", 10.0), ("10:30", 10.2), ("14:00", 10.5), ("14:12", 10.6)]
+    assert all(time_label.count(":") == 1 for time_label, _ in points)
+
+
+def test_alert_points_fall_back_to_time_scaled_flat_line_without_intraday():
+    class MemoryStore:
+        def __init__(self):
+            self.tables = {
+                "klines_intraday": [
+                    {"symbol": "002558.SZ", "period": "1m", "trade_date": "2026-05-12", "trade_time": "14:59:00", "close": 9.9},
+                ],
+            }
+
+        def rows(self, name):
+            return [dict(row) for row in self.tables.get(name, [])]
+
+    previous_today_text = core_module.today_text
+    core_module.today_text = lambda: "2026-05-13"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = App(Config(database_path=tmp))
+            app.store = MemoryStore()
+
+            points = app._alert_points("002558.SZ", 10.6, {"timestamp": "2026-05-13 14:12:30"})
+    finally:
+        core_module.today_text = previous_today_text
+
+    assert points == [("09:30", 10.6), ("15:00", 10.6)]
+
+
 def test_start_daily_update_uses_hermes_thread_scheduler():
     class MemoryStore:
         def rows(self, name):
@@ -730,6 +811,30 @@ def test_update_all_updates_market_indexes_and_reports_openclaw_style_summary():
     assert "✅ 深证成指（399001.SZ）" in notification
     assert "✅ 巨人网络（002558.SZ）" in notification
     assert "🏁 完成: 指数 2 成功" in notification
+
+
+def test_scheduled_post_close_review_sends_overview_and_each_stock_separately():
+    message = "\n\n".join(
+        [
+            "**🧭 收盘复盘总览**\n\n**【📊 本轮统计】**\n复盘数量: 2 只 | 成功 2 | 失败 0",
+            "**📘 收盘复盘｜巨人网络（002558.SZ）**\n• 收盘 32.38 | 当日 +2.37%",
+            "**📘 收盘复盘｜平潭发展（000592.SZ）**\n• 收盘 12.34 | 当日 +5.39%",
+        ]
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        app = App(Config(database_path=tmp, alert_delivery_target="telegram", alert_image_enabled=False))
+        app.set_context(DispatchCtx())
+
+        app._run_daily_scheduled_action(lambda: message, "post_close_review")
+        state = app._read_daily_state()
+
+    send_calls = [args for name, args in app.ctx.calls if name == "send_message"]
+    assert len(send_calls) == 3
+    assert send_calls[0]["message"].startswith("**🧭 收盘复盘总览**")
+    assert "巨人网络" in send_calls[1]["message"]
+    assert "平潭发展" not in send_calls[1]["message"]
+    assert "平潭发展" in send_calls[2]["message"]
+    assert state["lastNotificationError"] is None
 
 
 def test_daily_update_once_skips_stale_premarket_and_runs_daily_update():
@@ -1317,6 +1422,8 @@ def test_alert_points_keep_lunch_break_flat():
 
     assert points == [("11:29", 10.0), ("11:30", 10.1), ("13:00", 10.1), ("13:01", 10.5)]
     assert _scale_trading_x("11:30", 0, 100) == _scale_trading_x("13:00", 0, 100)
+    assert _scale_trading_x("14:12", 44, 650) < 694
+    assert _scale_trading_x("14:12", 44, 650) > _scale_trading_x("14:00", 44, 650)
 
 
 def test_jin10_json_rpc_parser_accepts_sse_events():
