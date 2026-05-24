@@ -1541,6 +1541,7 @@ class App:
         )
 
     def _alert_points(self, symbol: str, current_price: float, quote: dict[str, Any] | None = None) -> list[tuple[str, float]]:
+        quote_time = _quote_time_label(quote or {}) or now_cn().strftime("%H:%M")
         rows = [
             row for row in self.store.rows("klines_intraday")
             if row.get("symbol") == symbol and str(row.get("period") or "1m") == "1m"
@@ -1556,7 +1557,6 @@ class App:
             if time_label and price is not None
         ])
         if points:
-            quote_time = _quote_time_label(quote or {}) or now_cn().strftime("%H:%M")
             if _alert_time_label(quote_time):
                 last_time = points[-1][0]
                 if quote_time == last_time:
@@ -1565,7 +1565,9 @@ class App:
                     points.append((quote_time, current_price))
         if len(points) >= 2:
             return points
-        return [("09:30", current_price), ("15:00", current_price)]
+        if len(points) == 1 and _alert_clock_minutes(points[0][0]) > _alert_clock_minutes("09:30"):
+            return [("09:30", points[0][1]), points[0]]
+        return _fallback_alert_points(current_price, quote_time)
 
     def _sync_pre_market_flash_window(self, window: dict[str, Any]) -> None:
         cursor = None
@@ -2710,12 +2712,30 @@ def _quote_time_label(quote: dict[str, Any]) -> str | None:
         parsed = _alert_time_label(value)
         if parsed:
             return parsed
+        parsed = _alert_timestamp_time_label(value)
+        if parsed:
+            return parsed
+    return None
+
+
+def _alert_timestamp_time_label(value: Any) -> str | None:
+    if isinstance(value, str):
+        text = value.strip()
+        if not re.fullmatch(r"\d+(?:\.\d+)?", text):
+            return None
+        value = text
+    if isinstance(value, (int, float, str)):
         if isinstance(value, (int, float)):
-            try:
-                seconds = float(value) / 1000 if float(value) > 10_000_000_000 else float(value)
-                return datetime.fromtimestamp(seconds, tz=timezone(timedelta(hours=8))).strftime("%H:%M")
-            except (OSError, OverflowError, ValueError):
-                continue
+            raw = float(value)
+        else:
+            raw = safe_float(value)
+        if raw is None:
+            return None
+        try:
+            seconds = raw / 1000 if raw > 10_000_000_000 else raw
+            return datetime.fromtimestamp(seconds, tz=timezone(timedelta(hours=8))).strftime("%H:%M")
+        except (OSError, OverflowError, ValueError):
+            return None
     return None
 
 
@@ -2729,6 +2749,25 @@ def _alert_time_label(value: Any) -> str | None:
     if hour > 23 or minute > 59:
         return None
     return f"{hour:02d}:{minute:02d}"
+
+
+def _fallback_alert_points(current_price: float, quote_time: str | None) -> list[tuple[str, float]]:
+    live_time = _chart_time_label(quote_time)
+    if live_time:
+        return [("09:30", current_price), (live_time, current_price)]
+    return [("09:30", current_price), ("15:00", current_price)]
+
+
+def _chart_time_label(value: Any) -> str | None:
+    time_label = _alert_time_label(value)
+    if not time_label:
+        return None
+    minutes = _alert_clock_minutes(time_label)
+    if minutes <= _alert_clock_minutes("09:30"):
+        return "09:30"
+    if minutes >= _alert_clock_minutes("15:00"):
+        return "15:00"
+    return time_label
 
 
 def _alert_clock_minutes(time_label: str) -> int:

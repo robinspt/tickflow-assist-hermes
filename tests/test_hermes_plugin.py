@@ -643,7 +643,7 @@ def test_alert_points_use_intraday_clock_labels_and_append_quote_time():
     assert all(time_label.count(":") == 1 for time_label, _ in points)
 
 
-def test_alert_points_fall_back_to_time_scaled_flat_line_without_intraday():
+def test_alert_points_fall_back_to_realtime_axis_point_without_intraday():
     class MemoryStore:
         def __init__(self):
             self.tables = {
@@ -662,11 +662,13 @@ def test_alert_points_fall_back_to_time_scaled_flat_line_without_intraday():
             app = App(Config(database_path=tmp))
             app.store = MemoryStore()
 
-            points = app._alert_points("002558.SZ", 10.6, {"timestamp": "2026-05-13 14:12:30"})
+            timestamp_ms = str(int(datetime(2026, 5, 13, 14, 12, 30, tzinfo=timezone(timedelta(hours=8))).timestamp() * 1000))
+            points = app._alert_points("002558.SZ", 10.6, {"timestamp": timestamp_ms})
     finally:
         core_module.today_text = previous_today_text
 
-    assert points == [("09:30", 10.6), ("15:00", 10.6)]
+    assert points == [("09:30", 10.6), ("14:12", 10.6)]
+    assert _scale_trading_x(points[-1][0], 44, 650) < _scale_trading_x("15:00", 44, 650)
 
 
 def test_start_daily_update_uses_hermes_thread_scheduler():
